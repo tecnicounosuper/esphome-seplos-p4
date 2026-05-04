@@ -15,7 +15,6 @@ from esphome.const import (
 )
 from . import seplos_v3_ns, SeplosComponent
 
-# Definizione dei tipi di sensore supportati
 TYPES = {
     "battery_voltage": sensor.sensor_schema(
         unit_of_measurement=UNIT_VOLT,
@@ -46,12 +45,6 @@ CONFIG_SCHEMA = cv.Schema({
 }).extend(sensor.SENSOR_SCHEMA)
 
 async def to_code(config):
-    # Recupera l'hub principale (il componente seplos_v3)
     hub = await cg.get_variable(config[CONF_SEPLOS_V3_ID])
-    
-    # Crea l'oggetto sensore
     var = await sensor.new_sensor(config)
-    
-    # Chiama la funzione C++ per registrare il sensore nell'hub
-    # Esempio: hub->register_sensor(address, type, sensor_object)
     cg.add(hub.register_sensor(config[CONF_ADDRESS], config[CONF_TYPE], var))
