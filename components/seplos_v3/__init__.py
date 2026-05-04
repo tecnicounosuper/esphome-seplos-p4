@@ -3,10 +3,12 @@ import esphome.config_validation as cv
 from esphome.components import uart
 from esphome.const import CONF_ID
 
+# Nome del componente (deve corrispondere alla cartella su GitHub)
 DEPENDENCIES = ['uart']
 
-seplos_ns = cg.esphome_ns.namespace('seplos_v3_p4')
-SeplosComponent = seplos_ns.class_('SeplosComponent', cg.Component, uart.UARTDevice)
+# Namespace: usa 'seplos_v3' se la cartella si chiama così
+seplos_v3_ns = cg.esphome_ns.namespace('seplos_v3')
+SeplosComponent = seplos_v3_ns.class_('SeplosComponent', cg.Component, uart.UARTDevice)
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(SeplosComponent),
