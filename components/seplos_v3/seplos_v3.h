@@ -19,7 +19,7 @@ class SeplosComponent : public Component, public uart::UARTDevice {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  void register_sensor(uint8_t address, const std::string &type, sensor::Sensor *s);
+  void register_sensor(uint8_t address, std::string type, sensor::Sensor *s);
 
  protected:
   void process_byte_(uint8_t byte);
