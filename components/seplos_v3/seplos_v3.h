@@ -1,31 +1,29 @@
 #pragma once
 
-#include "esphome/core/component.h"
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/uart/uart.h"
+#include "esphome.core.component.h"
+#include "esphome.components.sensor.sensor.h"
+#include "esphome.components.uart.uart_device.h"
+#include <map>
 #include <vector>
 
 namespace esphome {
 namespace seplos_v3 {
 
-struct SeplosSensor {
-  uint8_t address;
-  std::string type;
-  sensor::Sensor *sensor;
-};
-
-class SeplosComponent : public uart::UARTDevice, public Component {
+class SeplosV3 : public PollingComponent, public uart::UARTDevice {
  public:
   void setup() override;
+  void update() override;
   void loop() override;
   void dump_config() override;
-  void register_sensor(uint8_t address, std::string type, sensor::Sensor *s);
+
+  void register_sensor(uint8_t address, std::string type, sensor::Sensor *obj);
 
  protected:
-  void process_byte_(uint8_t byte);
-  void decode_pia_(uint8_t address);
-  std::vector<uint8_t> rx_buffer_;
-  std::vector<SeplosSensor> sensors_;
+  struct BmsData {
+    std::map<std::string, sensor::Sensor *> sensors;
+  };
+  std::map<uint8_t, BmsData> bms_list_;
+  std::vector<uint8_t> buffer_;
 };
 
 }  // namespace seplos_v3
