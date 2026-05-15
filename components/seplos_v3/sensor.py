@@ -10,16 +10,16 @@ from . import seplos_v3_ns, SeplosV3
 
 CONF_SEPLOS_V3_ID = "seplos_v3_id"
 
-# Dizionario dei sensori supportati
+# Qui definiamo i "TYPE" esatti da scrivere nello YAML
 TYPES = {
     "battery_voltage": sensor.sensor_schema(unit_of_measurement=UNIT_VOLT, accuracy_decimals=2, device_class=DEVICE_CLASS_VOLTAGE),
     "current": sensor.sensor_schema(unit_of_measurement=UNIT_AMPERE, accuracy_decimals=2, device_class=DEVICE_CLASS_CURRENT),
-    "battery_soc": sensor.sensor_schema(unit_of_measurement=UNIT_PERCENT, accuracy_decimals=1, device_class=DEVICE_CLASS_BATTERY),
+    "soc": sensor.sensor_schema(unit_of_measurement=UNIT_PERCENT, accuracy_decimals=1, device_class=DEVICE_CLASS_BATTERY),
 }
 
-# Aggiungiamo automaticamente le 16 celle per evitare errori di battitura
+# Genera automaticamente cell_1, cell_2 ... cell_16
 for i in range(1, 17):
-    TYPES[f"cell_{i}_voltage"] = sensor.sensor_schema(unit_of_measurement=UNIT_VOLT, accuracy_decimals=3, device_class=DEVICE_CLASS_VOLTAGE)
+    TYPES[f"cell_{i}"] = sensor.sensor_schema(unit_of_measurement=UNIT_VOLT, accuracy_decimals=3, device_class=DEVICE_CLASS_VOLTAGE)
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(CONF_SEPLOS_V3_ID): cv.use_id(SeplosV3),
