@@ -10,14 +10,12 @@ from . import seplos_v3_ns, SeplosV3
 
 CONF_SEPLOS_V3_ID = "seplos_v3_id"
 
-# Qui definiamo i nomi ESATTI da usare nello YAML
 TYPES = {
     "battery_voltage": sensor.sensor_schema(unit_of_measurement=UNIT_VOLT, accuracy_decimals=2, device_class=DEVICE_CLASS_VOLTAGE),
     "battery_soc": sensor.sensor_schema(unit_of_measurement=UNIT_PERCENT, accuracy_decimals=1, device_class=DEVICE_CLASS_BATTERY),
     "current": sensor.sensor_schema(unit_of_measurement=UNIT_AMPERE, accuracy_decimals=2, device_class=DEVICE_CLASS_CURRENT),
 }
 
-# Aggiungiamo le 16 celle alla lista dei comandi validi
 for i in range(1, 17):
     TYPES[f"cell_{i}_voltage"] = sensor.sensor_schema(unit_of_measurement=UNIT_VOLT, accuracy_decimals=3, device_class=DEVICE_CLASS_VOLTAGE)
 
@@ -27,7 +25,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required(CONF_TYPE): cv.one_of(*TYPES, lower=True),
 }).extend(sensor.sensor_schema()).extend(cv.COMPONENT_SCHEMA)
 
-def to_code(config):
-    hub = yield cg.get_variable(config[CONF_SEPLOS_V3_ID])
-    var = yield sensor.new_sensor(config)
+async def to_code(config):
+    hub = await cg.get_variable(config[CONF_SEPLOS_V3_ID])
+    var = await sensor.new_sensor(config)
     cg.add(hub.register_sensor(config[CONF_ADDRESS], config[CONF_TYPE], var))
