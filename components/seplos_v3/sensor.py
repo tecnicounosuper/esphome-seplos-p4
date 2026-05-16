@@ -4,7 +4,7 @@ from esphome.components import sensor
 from esphome.const import (
     CONF_ID, CONF_TYPE, CONF_ADDRESS, 
     DEVICE_CLASS_VOLTAGE, DEVICE_CLASS_CURRENT, DEVICE_CLASS_BATTERY, DEVICE_CLASS_TEMPERATURE,
-    UNIT_VOLT, UNIT_AMPERE, UNIT_PERCENT, UNIT_CELSIUS, UNIT_AMPERE_HOUR
+    UNIT_VOLT, UNIT_AMPERE, UNIT_PERCENT, UNIT_CELSIUS
 )
 from . import seplos_v3_ns, SeplosV3
 
@@ -14,8 +14,9 @@ TYPES = {
     "battery_voltage": sensor.sensor_schema(unit_of_measurement=UNIT_VOLT, accuracy_decimals=2, device_class=DEVICE_CLASS_VOLTAGE),
     "current": sensor.sensor_schema(unit_of_measurement=UNIT_AMPERE, accuracy_decimals=2, device_class=DEVICE_CLASS_CURRENT),
     "battery_soc": sensor.sensor_schema(unit_of_measurement=UNIT_PERCENT, accuracy_decimals=1, device_class=DEVICE_CLASS_BATTERY),
-    "remaining_capacity": sensor.sensor_schema(unit_of_measurement=UNIT_AMPERE_HOUR, accuracy_decimals=2, icon="mdi:battery-charging-100"),
-    "total_capacity": sensor.sensor_schema(unit_of_measurement=UNIT_AMPERE_HOUR, accuracy_decimals=2, icon="mdi:battery-100"),
+    # Sostituite le costanti errate con la stringa nativa "Ah"
+    "remaining_capacity": sensor.sensor_schema(unit_of_measurement="Ah", accuracy_decimals=2, icon="mdi:battery-charging-100"),
+    "total_capacity": sensor.sensor_schema(unit_of_measurement="Ah", accuracy_decimals=2, icon="mdi:battery-100"),
 }
 
 # Genera automaticamente cell_1_voltage ... cell_16_voltage
