@@ -2,7 +2,9 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
-#include "esphome/components/uart/uart.h" // Corretto l'include principale della UART
+#include "esphome/components/uart/uart.h"
+#include <map>
+#include <string>
 
 namespace esphome {
 namespace seplos_v3 {
