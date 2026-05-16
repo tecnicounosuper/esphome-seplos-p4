@@ -7,7 +7,7 @@ namespace seplos_v3 {
 static const char *TAG = "seplos_v3";
 
 void SeplosV3::setup() {
-    ESP_LOGI(TAG, "Seplos V3 Sniffer Multi-Register Inizializzato");
+    ESP_LOGI(TAG, "Seplos V3 Sniffer Avanzato Inizializzato");
 }
 
 void SeplosV3::register_sensor(uint8_t address, std::string type, sensor::Sensor *obj) {
@@ -20,36 +20,35 @@ void SeplosV3::loop() {
         this->read_byte(&data);
         this->rx_buffer_.push_back(data);
 
-        // Allineamento all'inizio del frame: cerchiamo un potenziale indirizzo valido (es. 1 o 2)
-        // Evitiamo di accumulare byte vuoti (0x00) inutilmente all'inizio
-        if (this->rx_buffer_.size() == 1 && this->rx_buffer_[0] == 0x00) {
-            this->rx_buffer_.clear();
-            continue;
-        }
-
-        // Abbiamo almeno i primi 3 byte del frame Modbus? (Addr, Func, ByteCount)
-        if (this->rx_buffer_.size() >= 3) {
+        // Cerchiamo un header valido all'interno del buffer accumulato
+        while (this->rx_buffer_.size() >= 3) {
             uint8_t bms_addr = this->rx_buffer_[0];
             uint8_t func = this->rx_buffer_[1];
             uint8_t byte_count = this->rx_buffer_[2];
 
-            // Validazione rapida del preambolo Modbus (Funzioni comuni di lettura 0x03 o 0x04)
-            if ((bms_addr == 1 || bms_addr == 2) && (func == 0x03 || func == 0x04)) {
+            // Verifica se l'inizio sembra un pacchetto Modbus Seplos valido (ID 1 o 2, Funzione 3 o 4)
+            if ((bms_addr == 1 || bms_addr == 2) && (func == 0x03 || func == 0x04) && (byte_count > 0 && byte_count <= 100)) {
                 size_t total_expected_len = 3 + byte_count + 2; // Header(3) + Dati + CRC(2)
 
+                // Abbiamo abbastanza byte per l'intero pacchetto?
                 if (this->rx_buffer_.size() >= total_expected_len) {
                     this->parse_modbus_frame_(this->rx_buffer_.data(), total_expected_len);
-                    // Rimuoviamo il frame elaborato
+                    // Rimuoviamo SOLO i byte del pacchetto elaborato
                     this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + total_expected_len);
+                    continue; 
+                } else {
+                    // Il pacchetto è valido ma non è ancora arrivato tutto, usciamo dal loop e aspettiamo i prossimi byte
+                    break;
                 }
             } else {
-                // Se i dati iniziali non hanno senso, scartiamo il primo byte e proviamo a riallinearci
+                // Non è un inizio pacchetto valido, scartiamo il primo byte per riallinearci al prossimo giro
                 this->rx_buffer_.erase(this->rx_buffer_.begin());
             }
         }
     }
 
-    if (this->rx_buffer_.size() > 256) {
+    // Sicurezza per evitare sovraccarico di memoria
+    if (this->rx_buffer_.size() > 512) {
         this->rx_buffer_.clear();
     }
 }
@@ -60,21 +59,21 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
 
     if (this->bms_list_.find(bms_addr) == this->bms_list_.end()) return;
 
-    // Controllo CRC per sicurezza
+    // Verifica del CRC16 Modbus
     uint16_t computed_crc = this->crc16_(frame, length - 2);
     uint16_t received_crc = (frame[length - 1] << 8) | frame[length - 2];
     if (computed_crc != received_crc) {
-        return; // Salta i frame corrotti
+        return; // Salta se il CRC fallisce
     }
 
     auto &bmsSensors = this->bms_list_[bms_addr].sensors;
-    size_t offset = 3; 
+    size_t offset = 3; // Salta Addr, Func, ByteCount
 
-    ESP_LOGD(TAG, "Elaborazione pacchetto da BMS %d (Byte dati: %d)", bms_addr, byte_count);
-
-    // CASO 1: Pacchetto Celle e Temperature (Tipicamente risposte lunghe, es: 36 byte [0x24] o superiori)
+    // CASO 1: Pacchetto Celle e Temperature (Visto a 0x34 = 52 byte nel log)
     if (byte_count >= 36) {
-        // 16 Celle (2 byte l'una = 32 byte)
+        ESP_LOGI(TAG, "<<< Ricevuto Pacchetto Celle/Temperature da BMS %d (%d byte) >>>", bms_addr, byte_count);
+        
+        // 16 Celle (32 byte totali)
         for (int i = 1; i <= 16; i++) {
             std::string cell_key = "cell_" + std::to_string(i) + "_voltage";
             if (offset + 1 < length) {
@@ -86,7 +85,7 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
             }
         }
 
-        // Temperature rimanenti nel frame (se presenti subito dopo le celle)
+        // 5 Temperature (10 byte totali)
         for (int i = 1; i <= 5; i++) {
             std::string temp_key = "temperature_" + std::to_string(i);
             if (offset + 1 < length) {
@@ -99,9 +98,8 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
             }
         }
     } 
-    // CASO 2: Pacchetto Dati Generali Corto (Tipicamente 16 byte [0x10] o simili)
+    // CASO 2: Pacchetto dati generali corto (Visto nei log di bms0 che aggiornano V, A, SOC)
     else {
-        // Se l'offset dei dati generali corrisponde a quello che già ricevevi con successo:
         if (bmsSensors.find("current") != bmsSensors.end() && (offset + 1 < length)) {
             int16_t raw_current = (frame[offset] << 8) | frame[offset + 1];
             bmsSensors["current"]->publish_state(raw_current / 10.0f);
@@ -137,7 +135,7 @@ uint16_t SeplosV3::crc16_(const uint8_t *data, size_t len) {
 }
 
 void SeplosV3::dump_config() {
-    ESP_LOGCONFIG(TAG, "Seplos V3 Sniffer Multi-Register:");
+    ESP_LOGCONFIG(TAG, "Seplos V3 Sniffer:");
 }
 
 }  // namespace seplos_v3
