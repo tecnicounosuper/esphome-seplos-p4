@@ -28,7 +28,7 @@ void SeplosV3::update() {
 
 void SeplosV3::dump_config() {
     ESP_LOGCONFIG(TAG, "Seplos V3:");
-    for (auto const& [addr, bms] : bms_list_) {
+    for (auto const& [addr, bms] : this->bms_list_) {
         ESP_LOGCONFIG(TAG, "  BMS Indirizzo: %d monitorato", addr);
     }
 }
