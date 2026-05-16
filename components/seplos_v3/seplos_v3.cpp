@@ -1,5 +1,5 @@
 #include "seplos_v3.h"
-#include "esphome.core.log.h"
+#include "esphome/core/log.h"
 
 namespace esphome {
 namespace seplos_v3 {
@@ -18,14 +18,12 @@ void SeplosV3::loop() {
     while (this->available()) {
         uint8_t data;
         this->read_byte(&data);
-        // Qui va la logica di parsing dei frame Modbus RTU che abbiamo visto nel documento
-        // Per ora logghiamo il traffico per debug
         ESP_LOGVV(TAG, "Dato ricevuto: %02X", data);
     }
 }
 
 void SeplosV3::update() {
-    // Richiesta dati ciclica se non sei in modalità sniffer passivo
+    // Gestione aggiornamento dati ciclico
 }
 
 void SeplosV3::dump_config() {
