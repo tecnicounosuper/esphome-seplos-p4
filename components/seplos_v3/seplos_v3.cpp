@@ -24,27 +24,40 @@ void SeplosV3::loop() {
 
     // 2. Analisi dinamica dei pacchetti con finestra scorrevole
     while (this->rx_buffer_.size() >= 5) { 
+        
+        // Sganciamo le richieste Master (Inverter): sono SEMPRE lunghe esattamente 8 byte
+        if (this->rx_buffer_.size() >= 8) {
+            uint16_t master_calc_crc = this->crc16_(this->rx_buffer_.data(), 6);
+            uint16_t master_rec_crc = (this->rx_buffer_[7] << 8) | this->rx_buffer_[6];
+            
+            if (master_calc_crc == master_rec_crc) {
+                // È una richiesta dell'inverter. La consumiamo e la rimuoviamo per liberare la risposta del BMS.
+                this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + 8);
+                continue; 
+            }
+        }
+
         uint8_t bms_addr = this->rx_buffer_[0];
         uint8_t func = this->rx_buffer_[1];
         uint8_t byte_count = this->rx_buffer_[2];
 
-        // Filtro flessibile sugli indirizzi BMS (da 0 a 4) e funzioni Modbus standard (0x03 e 0x04)
+        // Filtro flessibile sugli indirizzi BMS (0-4) e funzioni Modbus di lettura (0x03 e 0x04)
         if ((bms_addr <= 4) && (func == 0x03 || func == 0x04) && (byte_count > 0 && byte_count <= 100)) {
             size_t total_expected_len = 3 + byte_count + 2; 
 
-            // Se il frame non è ancora completo in seriale, aspettiamo il prossimo ciclo
+            // Se il frame di risposta non è ancora completo in seriale, aspettiamo il prossimo ciclo loop
             if (this->rx_buffer_.size() < total_expected_len) {
                 break; 
             }
 
-            // Elaborazione del pacchetto integro
+            // Elaborazione del pacchetto integro di risposta del BMS
             this->parse_modbus_frame_(this->rx_buffer_.data(), total_expected_len);
             
-            // Svuotiamo il buffer solo per i byte consumati
+            // Svuotiamo il buffer per i byte effettivamente consumati
             this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + total_expected_len);
             continue; 
         } else {
-            // Se non c'è allineamento, scartiamo il primo byte e avanziamo
+            // Se non c'è allineamento e non è una richiesta master, scartiamo il singolo byte sporco e avanziamo
             this->rx_buffer_.erase(this->rx_buffer_.begin());
         }
     }
@@ -58,23 +71,30 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
     uint8_t bms_addr = frame[0];
     uint8_t byte_count = frame[2];
 
+    // Verifica rigidamente il CRC della risposta del BMS per evitare sbalzi nei grafici
+    uint16_t computed_crc = this->crc16_(frame, length - 2);
+    uint16_t received_crc = (frame[length - 1] << 8) | frame[length - 2];
+    if (computed_crc != received_crc) {
+        return;
+    }
+
     if (this->bms_list_.find(bms_addr) == this->bms_list_.end()) return;
 
     auto &bmsSensors = this->bms_list_[bms_addr].sensors;
-    size_t offset = 3; 
 
     // =========================================================================
-    // ESTRAZIONE DELLE CELLE (Attiva su qualsiasi pacchetto lungo, >= 32 byte)
+    // ESTRAZIONE DELLE CELLE E TEMPERATURE (Pacchetti lunghi, >= 32 byte)
     // =========================================================================
     if (byte_count >= 32) {
-        ESP_LOGD(TAG, "BMS %d: Rilevato pacchetto celle/temperature (Byte count: %d)", bms_addr, byte_count);
+        ESP_LOGD(TAG, "BMS %d: Ricevuto pacchetto celle/temperature valido (%d byte)", bms_addr, byte_count);
+        size_t offset = 3; 
 
         // Estrazione sequenziale delle 16 celle (2 byte l'una = 32 byte)
         for (int i = 1; i <= 16; i++) {
             std::string cell_key = "cell_" + std::to_string(i) + "_voltage";
-            if (offset + 1 < length) {
+            if (offset + 1 < length - 2) {
                 uint16_t raw_volt = (frame[offset] << 8) | frame[offset + 1];
-                // Validazione range LiFePO4 (1.5V - 4.2V) per scartare letture sporche
+                // Validazione range chimica LiFePO4 (1.5V - 4.2V)
                 if (raw_volt >= 1500 && raw_volt <= 4200) { 
                     if (bmsSensors.find(cell_key) != bmsSensors.end()) {
                         bmsSensors[cell_key]->publish_state(raw_volt / 1000.0f);
@@ -84,13 +104,12 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
             }
         }
 
-        // Estrazione delle temperature (se avanzano byte nel pacchetto prima del CRC)
+        // Estrazione delle temperature (Seplos V3 le esprime in Kelvin es: 2932 = 20.05 °C)
         int temp_index = 1;
         while (offset + 1 < length - 2 && temp_index <= 4) {
             std::string temp_key = "temperature_" + std::to_string(temp_index);
             int16_t raw_temp = (frame[offset] << 8) | frame[offset + 1];
             
-            // Gestione conversione Kelvin / Celsius
             float final_temp = (raw_temp > 1000) ? (raw_temp / 10.0f) - 273.15f : (raw_temp / 10.0f);
             if (final_temp > -20.0f && final_temp < 80.0f) {
                 if (bmsSensors.find(temp_key) != bmsSensors.end()) {
@@ -102,32 +121,27 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
         }
     } 
     // =========================================================================
-    // ESTRAZIONE DATI GENERALI (Pacchetti di riepilogo corti, < 32 byte)
+    // ESTRAZIONE DATI GENERALI (Pacchetto di riepilogo da 36 byte / 0x24)
     // =========================================================================
-    else {
-        // Applichiamo il controllo CRC rigido sui riepiloghi per evitare sbalzi nei grafici di Home Assistant
-        uint16_t computed_crc = this->crc16_(frame, length - 2);
-        uint16_t received_crc = (frame[length - 1] << 8) | frame[length - 2];
-        if (computed_crc != received_crc) return;
+    else if (byte_count == 0x24) {
+        ESP_LOGD(TAG, "BMS %d: Ricevuto pacchetto riepilogo generale valido (%d byte)", bms_addr, byte_count);
 
-        ESP_LOGD(TAG, "BMS %d: Rilevato pacchetto riepilogo generale (Byte count: %d)", bms_addr, byte_count);
-
-        // Se il pacchetto corto contiene almeno 6 byte di dati utili (es. i classici 3 registri standard)
-        if (byte_count >= 6) {
-            if (bmsSensors.find("current") != bmsSensors.end() && (offset + 1 < length)) {
-                int16_t raw_current = (frame[offset] << 8) | frame[offset + 1];
-                bmsSensors["current"]->publish_state(raw_current / 10.0f);
-                offset += 2;
-            }
-            if (bmsSensors.find("battery_voltage") != bmsSensors.end() && (offset + 1 < length)) {
-                uint16_t raw_pack_volt = (frame[offset] << 8) | frame[offset + 1];
-                bmsSensors["battery_voltage"]->publish_state(raw_pack_volt / 100.0f);
-                offset += 2;
-            }
-            if (bmsSensors.find("battery_soc") != bmsSensors.end() && (offset + 1 < length)) {
-                uint16_t raw_soc = (frame[offset] << 8) | frame[offset + 1];
-                bmsSensors["battery_soc"]->publish_state(raw_soc / 10.0f);
-            }
+        // Mappatura esatta basata sui registri Seplos V3 riscontrati nel log
+        if (bmsSensors.find("battery_voltage") != bmsSensors.end()) {
+            uint16_t raw_pack_volt = (frame[3] << 8) | frame[4];
+            bmsSensors["battery_voltage"]->publish_state(raw_pack_volt / 100.0f);
+        }
+        if (bmsSensors.find("current") != bmsSensors.end()) {
+            int16_t raw_current = (frame[5] << 8) | frame[6];
+            bmsSensors["current"]->publish_state(raw_current / 100.0f); // Divisione per 100 per precisione a 0.01A
+        }
+        if (bmsSensors.find("remaining_capacity") != bmsSensors.end()) {
+            uint16_t raw_rem = (frame[7] << 8) | frame[8];
+            bmsSensors["remaining_capacity"]->publish_state(raw_rem / 100.0f);
+        }
+        if (bmsSensors.find("battery_soc") != bmsSensors.end()) {
+            uint16_t raw_soc = (frame[11] << 8) | frame[12];
+            bmsSensors["battery_soc"]->publish_state(raw_soc / 100.0f);
         }
     }
 }
