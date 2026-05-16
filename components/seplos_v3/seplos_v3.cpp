@@ -7,7 +7,7 @@ namespace seplos_v3 {
 static const char *TAG = "seplos_v3";
 
 void SeplosV3::setup() {
-    ESP_LOGI(TAG, "Seplos V3 Sniffer Asincrono Inizializzato");
+    ESP_LOGI(TAG, "Seplos V3 Sniffer Calibrato su 0x24 Inizializzato");
 }
 
 void SeplosV3::register_sensor(uint8_t address, std::string type, sensor::Sensor *obj) {
@@ -15,42 +15,40 @@ void SeplosV3::register_sensor(uint8_t address, std::string type, sensor::Sensor
 }
 
 void SeplosV3::loop() {
-    // 1. Leggiamo tutti i byte disponibili dalla UART e accumuliamoli nel buffer
+    // 1. Leggiamo i byte dalla UART
     while (this->available()) {
         uint8_t data;
         this->read_byte(&data);
         this->rx_buffer_.push_back(data);
     }
 
-    // 2. Analizziamo il buffer alla ricerca di frame Modbus validi
-    while (this->rx_buffer_.size() >= 5) { // Almeno l'intestazione minima (Addr + Func + Len + 2 Byte CRC)
+    // 2. Analizziamo il buffer con finestra scorrevole
+    while (this->rx_buffer_.size() >= 5) { 
         uint8_t bms_addr = this->rx_buffer_[0];
         uint8_t func = this->rx_buffer_[1];
         uint8_t byte_count = this->rx_buffer_[2];
 
-        // Validazione preliminare dei preamboli Seplos V3 (Indirizzi 1 o 2, Funzioni standard 3 o 4)
+        // Validazione preamboli Seplos V3 (ID 1 o 2, Funzione 3 o 4)
         if ((bms_addr == 1 || bms_addr == 2) && (func == 0x03 || func == 0x04) && (byte_count > 0 && byte_count <= 100)) {
             size_t total_expected_len = 3 + byte_count + 2; 
 
-            // Se non sono ancora arrivati tutti i byte previsti per questo specifico pacchetto,
-            // ci fermiamo e aspettiamo i prossimi cicli di loop senza distruggere il buffer
+            // Se il pacchetto non è ancora arrivato tutto, aspettiamo il prossimo ciclo
             if (this->rx_buffer_.size() < total_expected_len) {
                 break; 
             }
 
-            // Abbiamo l'intero pacchetto integro nel buffer: procediamo al parsing!
+            // Pacchetto completo: elaboriamo!
             this->parse_modbus_frame_(this->rx_buffer_.data(), total_expected_len);
             
-            // Rimuoviamo SOLO i byte elaborati di questo pacchetto, preservando quello che c'è dopo
+            // Rimuoviamo il pacchetto dal buffer
             this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + total_expected_len);
             continue; 
         } else {
-            // Se i primi byte non corrispondono a un inizio frame valido, scartiamo solo il primo byte per riallinearci
+            // Non allineato, scarta un byte
             this->rx_buffer_.erase(this->rx_buffer_.begin());
         }
     }
 
-    // Protezione per evitare saturazione della memoria in caso di rumore elettrico persistente sulla linea
     if (this->rx_buffer_.size() > 1024) {
         this->rx_buffer_.clear();
     }
@@ -65,15 +63,17 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
     auto &bmsSensors = this->bms_list_[bms_addr].sensors;
     size_t offset = 3; 
 
-    // CASO 1: Pacchetto Celle e Temperature (52 byte di dati = 0x34)
-    if (byte_count == 0x34) {
-        // Estrazione 16 Celle (2 byte ciascuna = 32 byte)
+    // CASO 1: Pacchetto Celle e Temperature (Rilevato a 0x24 = 36 byte o 0x34 = 52 byte)
+    if (byte_count == 0x24 || byte_count == 0x34) {
+        ESP_LOGD(TAG, "Parsing pacchetto celle/temp per BMS %d (Lunghezza dati: %d)", bms_addr, byte_count);
+
+        // Estrazione delle 16 Celle (32 byte totali)
         for (int i = 1; i <= 16; i++) {
             std::string cell_key = "cell_" + std::to_string(i) + "_voltage";
             if (offset + 1 < length) {
                 uint16_t raw_volt = (frame[offset] << 8) | frame[offset + 1];
-                // Controllo di sanità del dato per escludere spike anomali
-                if (raw_volt >= 2000 && raw_volt <= 4500) { 
+                // Controllo di targa per LiFePO4 (accetta tensioni da 1.0V a 4.5V)
+                if (raw_volt >= 1000 && raw_volt <= 4500) { 
                     if (bmsSensors.find(cell_key) != bmsSensors.end()) {
                         bmsSensors[cell_key]->publish_state(raw_volt / 1000.0f);
                     }
@@ -82,13 +82,12 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
             }
         }
 
-        // Estrazione 5 Temperature (2 byte ciascuna = 10 byte)
-        for (int i = 1; i <= 5; i++) {
+        // Estrazione delle Temperature rimanenti nel frame
+        for (int i = 1; i <= 4; i++) {
             std::string temp_key = "temperature_" + std::to_string(i);
             if (offset + 1 < length) {
                 int16_t raw_temp = (frame[offset] << 8) | frame[offset + 1];
                 if (bmsSensors.find(temp_key) != bmsSensors.end()) {
-                    // Conversione da Kelvin a Gradi Celsius se il valore è grezzo in K (>1000)
                     float final_temp = (raw_temp > 1000) ? (raw_temp / 10.0f) - 273.15f : (raw_temp / 10.0f);
                     if (final_temp > -20.0f && final_temp < 80.0f) {
                         bmsSensors[temp_key]->publish_state(final_temp);
@@ -98,9 +97,9 @@ void SeplosV3::parse_modbus_frame_(const uint8_t *frame, size_t length) {
             }
         }
     } 
-    // CASO 2: Pacchetti corti (Dati generali di riepilogo)
+    // CASO 2: Pacchetti corti (Dati di riepilogo generali)
     else {
-        // Eseguiamo il controllo CRC standard per garantire l'accuratezza dei parametri principali
+        // Controllo CRC per i dati sensibili di riepilogo
         uint16_t computed_crc = this->crc16_(frame, length - 2);
         uint16_t received_crc = (frame[length - 1] << 8) | frame[length - 2];
         if (computed_crc != received_crc) return;
