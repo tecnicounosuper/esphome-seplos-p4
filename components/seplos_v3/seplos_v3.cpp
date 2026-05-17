@@ -16,7 +16,7 @@ void _SeplosV3::loop() {
     read_byte(&byte);
     rx_buffer_.push_back(byte);
 
-    // Manteniamo il buffer abbastanza capiente per elaborare trame concorrenti
+    // Evitiamo che il buffer cresca all'infinito in caso di disallineamento
     if (rx_buffer_.size() > 512) {
       rx_buffer_.erase(rx_buffer_.begin());
     }
@@ -26,27 +26,31 @@ void _SeplosV3::loop() {
 }
 
 void _SeplosV3::parse_buffer_() {
+  // Abbiamo bisogno di almeno 5 byte per validare l'header Modbus
   if (rx_buffer_.size() < 5) return;
 
   for (size_t i = 0; i <= rx_buffer_.size() - 5; i++) {
-    // Verifica l'indirizzo del BMS corrente (0x01 o 0x02) e la funzione di lettura (0x04)
+    // Controlla se il byte corrisponde all'indirizzo di questa istanza (0x01 o 0x02) e alla funzione Modbus 0x04
     if (rx_buffer_[i] == this->address_ && rx_buffer_[i+1] == 0x04) {
       
-      // Il Byte 2 contiene il numero di byte di dati restituiti dal BMS
       uint8_t byte_count = rx_buffer_[i+2];
       
-      // La lunghezza totale del frame è: Header (3 byte) + Dati (byte_count) + CRC (2 byte)
-      size_t frame_len = 3 + byte_count + 2;
+      // Controllo di plausibilità sulla dimensione dei dati per il Seplos V3 (tipicamente 52 byte / 0x34)
+      if (byte_count < 10 || byte_count > 100) {
+        continue; // Non è un pacchetto valido per noi, continua la ricerca nel buffer
+      }
+
+      size_t frame_len = 3 + byte_count + 2; // Header (3) + Dati (byte_count) + CRC (2)
       
-      // Se il pacchetto nel buffer non è ancora completo, aspettiamo i prossimi cicli del loop
+      // Se il frame completo non è ancora arrivato interamente nel buffer, aspettiamo il prossimo loop
       if (rx_buffer_.size() < i + frame_len) {
         return; 
       }
 
-      // Puntatore all'inizio dei dati (subito dopo l'header di 3 byte)
+      // Puntatore all'inizio del blocco dati utile (subito dopo l'header)
       const uint8_t *data = &rx_buffer_[i + 3];
 
-      // 1. Tensioni Celle (16 celle = 32 byte)
+      // 1. Decodifica Tensioni Celle (16 celle = 32 byte)
       for (size_t c = 0; c < 16; c++) {
         if (this->cell_sensors_[c] != nullptr && (c * 2 + 1) < byte_count) {
           uint16_t cell_mv = (data[c * 2] << 8) | data[c * 2 + 1];
@@ -54,7 +58,7 @@ void _SeplosV3::parse_buffer_() {
         }
       }
 
-      // 2. Temperature (4 sonde = 8 byte, posizionate subito dopo le celle -> offset 32)
+      // 2. Decodifica Temperature Sonde Celle (4 sonde = 8 byte, parte da offset 32)
       size_t temp_offset = 32; 
       for (size_t t = 0; t < 4; t++) {
         if (this->cell_temp_sensors_[t] != nullptr && (temp_offset + t * 2 + 1) < byte_count) {
@@ -64,33 +68,33 @@ void _SeplosV3::parse_buffer_() {
         }
       }
 
-      // MAPPATURA CORRETTA DEI REGISTRI GENERALI DEL SEPLOS V3:
-      // 3. Corrente (2 byte -> offset 40 nella sezione dati)
-      size_t current_offset = 40; 
+      // 3. MAPPATURA CORRETTA: Corrente Batteria (2 byte -> offset 44 nella sezione dati)
+      // Nota: Nel Seplos V3 la corrente ha segno (int16_t). Valori positivi = Carica, Negativi = Scarica.
+      size_t current_offset = 44; 
       if (this->current_sensor_ != nullptr && (current_offset + 1) < byte_count) {
         int16_t raw_current = (data[current_offset] << 8) | data[current_offset + 1];
-        // La corrente nel Seplos V3 ha una risoluzione di 0.01A o 0.1A a seconda del modello.
-        // Se noti valori troppo alti/bassi, cambieremo il divisore. Proviamo con 100.0f.
+        // Molti modelli Seplos V3 usano una risoluzione a 0.01A (divisore 100.0). Se la lettura risulta
+        // troppo bassa di un fattore 10, basterà cambiare il divisore in 10.0f.
         this->current_sensor_->publish_state(raw_current / 100.0f);
       }
 
-      // 4. Tensione Pacco (2 byte -> offset 42 nella sezione dati)
-      size_t voltage_offset = 42;
+      // 4. MAPPATURA CORRETTA: Tensione Totale del Pacco (2 byte -> offset 46 nella sezione dati)
+      size_t voltage_offset = 46;
       if (this->pack_voltage_sensor_ != nullptr && (voltage_offset + 1) < byte_count) {
         uint16_t raw_voltage = (data[voltage_offset] << 8) | data[voltage_offset + 1];
+        // Risoluzione a 0.1V o 0.01V a seconda del firmware. Proviamo inizialmente con 100.0f per i centesimi di Volt.
         this->pack_voltage_sensor_->publish_state(raw_voltage / 100.0f);
       }
 
-      // 5. Stato di Carica (SOC - 2 byte -> offset 44 nella sezione dati)
-      size_t soc_offset = 44;
+      // 5. MAPPATURA CORRETTA: State of Charge / SOC (2 byte -> offset 48 nella sezione dati)
+      size_t soc_offset = 48;
       if (this->soc_sensor_ != nullptr && (soc_offset + 1) < byte_count) {
         uint16_t raw_soc = (data[soc_offset] << 8) | data[soc_offset + 1];
-        // Il SOC viene restituito in percentuale diretta o decimi di percentuale.
-        // Se ad esempio vedi 1000 invece di 100%, useremo / 10.0f.
+        // Risoluzione in decimi di percentuale (es: 950 = 95.0%)
         this->soc_sensor_->publish_state(raw_soc / 10.0f);
       }
 
-      // Rimuove in modo pulito l'intero pacchetto elaborato dal buffer
+      // Rimuoviamo dal buffer solo i dati relativi al frame appena processato con successo
       rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + i + frame_len);
       return;
     }
