@@ -3,17 +3,15 @@ import esphome.config_validation as cv
 from esphome.components import uart
 from esphome.const import CONF_ID
 
-# Definiamo le dipendenze
 DEPENDENCIES = ['uart']
-AUTO_LOAD = ['sensor']
+MULTI_CONF = True
 
 seplos_v3_ns = cg.esphome_ns.namespace('seplos_v3')
-SeplosV3 = seplos_v3_ns.class_('SeplosV3', cg.PollingComponent, uart.UARTDevice)
+SeplosV3 = seplos_v3_ns.class_('_SeplosV3', cg.Component, uart.UARTDevice)
 
-# La correzione principale è qui sotto
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(SeplosV3),
-}).extend(cv.polling_component_schema('60s')).extend(uart.UART_DEVICE_SCHEMA)
+}).extend(uart.UART_DEVICE_SCHEMA).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
