@@ -4,6 +4,7 @@ from esphome.components import uart
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ['uart']
+AUTO_LOAD = ['sensor', 'text_sensor']  # <--- RIGA FONDAMENTALE AGGIUNTA
 MULTI_CONF = True
 
 seplos_v3_ns = cg.esphome_ns.namespace('seplos_v3')
