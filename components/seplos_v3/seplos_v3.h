@@ -15,6 +15,8 @@ class _SeplosV3 : public Component, public uart::UARTDevice {
   void loop() override;
   void dump_config() override;
 
+  void set_address(uint8_t address) { address_ = address; } // Setter per l'indirizzo
+
   void set_pack_voltage_sensor(sensor::Sensor *s) { pack_voltage_sensor_ = s; }
   void set_current_sensor(sensor::Sensor *s) { current_sensor_ = s; }
   void set_soc_sensor(sensor::Sensor *s) { soc_sensor_ = s; }
@@ -32,6 +34,7 @@ class _SeplosV3 : public Component, public uart::UARTDevice {
  protected:
   void parse_buffer_();
   
+  uint8_t address_{0x01}; // Indirizzo di default
   sensor::Sensor *pack_voltage_sensor_{nullptr};
   sensor::Sensor *current_sensor_{nullptr};
   sensor::Sensor *soc_sensor_{nullptr};
