@@ -9,8 +9,12 @@ CONF_FET_STATUS = "fet_status"
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(CONF_SEPLOS_V3_ID): cv.use_id(SeplosV3),
-    cv.Optional(CONF_SYSTEM_STATUS): text_sensor.text_sensor_schema(),
-    cv.Optional(CONF_FET_STATUS): text_sensor.text_sensor_schema(),
+    cv.Optional(CONF_SYSTEM_STATUS): text_sensor.text_sensor_schema(
+        icon="mdi:info-outline"
+    ),
+    cv.Optional(CONF_FET_STATUS): text_sensor.text_sensor_schema(
+        icon="mdi:gate"
+    ),
 })
 
 async def to_code(config):
