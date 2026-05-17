@@ -1,33 +1,47 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/uart/uart.h"
-#include <map>
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include <vector>
-#include <string>
 
 namespace esphome {
 namespace seplos_v3 {
 
-class SeplosV3 : public PollingComponent, public uart::UARTDevice {
+class _SeplosV3 : public Component, public uart::UARTDevice {
  public:
   void setup() override;
-  void update() override;
   void loop() override;
   void dump_config() override;
 
-  void register_sensor(uint8_t address, std::string type, sensor::Sensor *obj);
+  void set_pack_voltage_sensor(sensor::Sensor *s) { pack_voltage_sensor_ = s; }
+  void set_current_sensor(sensor::Sensor *s) { current_sensor_ = s; }
+  void set_soc_sensor(sensor::Sensor *s) { soc_sensor_ = s; }
+  
+  void set_cell_sensor(size_t index, sensor::Sensor *s) {
+    if (index < 16) cell_sensors_[index] = s;
+  }
+  void set_cell_temp_sensor(size_t index, sensor::Sensor *s) {
+    if (index < 4) cell_temp_sensors_[index] = s;
+  }
+
+  void set_system_status_text_sensor(text_sensor::TextSensor *s) { system_status_text_sensor_ = s; }
+  void set_fet_status_text_sensor(text_sensor::TextSensor *s) { fet_status_text_sensor_ = s; }
 
  protected:
-  struct BmsData {
-    std::map<std::string, sensor::Sensor *> sensors;
-  };
-  std::map<uint8_t, BmsData> bms_list_;
-  std::vector<uint8_t> rx_buffer_;
+  void parse_buffer_();
   
-  void parse_modbus_frame_(const uint8_t *frame, size_t length);
-  uint16_t crc16_(const uint8_t *data, size_t len);
+  sensor::Sensor *pack_voltage_sensor_{nullptr};
+  sensor::Sensor *current_sensor_{nullptr};
+  sensor::Sensor *soc_sensor_{nullptr};
+  sensor::Sensor *cell_sensors_[16]{nullptr};
+  sensor::Sensor *cell_temp_sensors_[4]{nullptr};
+
+  text_sensor::TextSensor *system_status_text_sensor_{nullptr};
+  text_sensor::TextSensor *fet_status_text_sensor_{nullptr};
+
+  std::vector<uint8_t> rx_buffer_;
 };
 
 }  // namespace seplos_v3
