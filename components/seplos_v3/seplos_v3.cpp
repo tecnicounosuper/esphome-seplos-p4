@@ -28,7 +28,8 @@ void _SeplosV3::parse_buffer_() {
   if (rx_buffer_.size() < 5) return;
 
   for (size_t i = 0; i <= rx_buffer_.size() - 5; i++) {
-    if ((rx_buffer_[i] == 0x01 || rx_buffer_[i] == 0x02) && rx_buffer_[i+1] == 0x04 && rx_buffer_[i+2] == 0x34) {
+    // FILTRO FONDAMENTALE: Controlla se il byte corrisponde all'indirizzo assegnato a QUESTA istanza
+    if (rx_buffer_[i] == this->address_ && rx_buffer_[i+1] == 0x04 && rx_buffer_[i+2] == 0x34) {
       size_t frame_len = 57; 
       
       if (rx_buffer_.size() < i + frame_len) {
@@ -83,7 +84,7 @@ void _SeplosV3::parse_buffer_() {
 }
 
 void _SeplosV3::dump_config() {
-  ESP_LOGCONFIG(TAG, "Seplos V3 Custom Component attivo.");
+  ESP_LOGCONFIG(TAG, "Seplos V3 Custom Component - Indirizzo assegnato: 0x%02X", this->address_);
 }
 
 }  // namespace seplos_v3
