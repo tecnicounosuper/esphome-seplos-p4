@@ -30,4 +30,17 @@ CONFIG_SCHEMA = cv.Schema({
         state_class=STATE_CLASS_MEASUREMENT,
         icon="mdi:battery-high",
     ),
-    cv.Optional(CONF_CURRENT): sensor
+    cv.Optional(CONF_CURRENT): sensor.sensor_schema(
+        unit_of_measurement=UNIT_AMPERE,
+        accuracy_decimals=2,
+        device_class=DEVICE_CLASS_CURRENT,
+        state_class=STATE_CLASS_MEASUREMENT,
+        icon="mdi:current-ac",
+    ),
+    cv.Optional(CONF_SOC): sensor.sensor_schema(
+        unit_of_measurement=UNIT_PERCENT,
+        accuracy_decimals=1,
+        device_class=DEVICE_CLASS_BATTERY,
+        state_class=STATE_CLASS_MEASUREMENT,
+        icon="mdi:battery-charging-100",
+    ),
