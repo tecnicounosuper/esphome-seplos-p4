@@ -16,14 +16,14 @@ void _SeplosV3::setup() {
 }
 
 void _SeplosV3::loop() {
-  // Qualsiasi istanza giri per prima, svuota la seriale accumulando nel buffer globale condiviso
+  // Accumula tutti i byte in arrivo dalla seriale nel buffer globale condiviso
   while (available()) {
     uint8_t byte;
     read_byte(&byte);
     global_rx_buffer.push_back(byte);
   }
 
-  // Evitiamo che il buffer cresca all'infinito in caso di disallineamenti gravi
+  // Protezione per evitare che il buffer cresca all'infinito in caso di disallineamenti gravi
   if (global_rx_buffer.size() > 1024) {
     global_rx_buffer.erase(global_rx_buffer.begin(), global_rx_buffer.begin() + 256);
   }
@@ -32,32 +32,37 @@ void _SeplosV3::loop() {
 }
 
 void _SeplosV3::parse_buffer_() {
-  if (global_rx_buffer.size() < 5) return;
-
-  for (size_t i = 0; i <= global_rx_buffer.size() - 5; i++) {
-    // Controlla l'indirizzo dell'istanza corrente (0x01 o 0x02) e la funzione Modbus 0x04
-    if (global_rx_buffer[i] == this->address_ && global_rx_buffer[i+1] == 0x04) {
+  // Abbiamo bisogno di almeno 5 byte per leggere un header Modbus coerente
+  while (global_rx_buffer.size() >= 5) {
+    uint8_t addr = global_rx_buffer[0];
+    uint8_t func = global_rx_buffer[1];
+    uint8_t byte_count = global_rx_buffer[2];
+    
+    // Un frame di risposta Seplos V3 valido DEVE iniziare con Indirizzo (0x01 o 0x02), 
+    // Funzione Modbus (0x04) e un numero di byte dati pari a 0x34 (52 byte) o 0x24 (36 byte)
+    if ((addr != 0x01 && addr != 0x02) || func != 0x04 || (byte_count != 0x34 && byte_count != 0x24)) {
+      // Se non è l'inizio esatto di una risposta valida, scartiamo il primo byte 
+      // e continuiamo a scorrere la coda (elimina richieste ed eco della trasmittente)
+      global_rx_buffer.erase(global_rx_buffer.begin());
+      continue;
+    }
+    
+    // Calcoliamo la lunghezza totale attesa del pacchetto: Header (3 byte) + Dati (byte_count) + CRC (2 byte)
+    size_t frame_len = 3 + byte_count + 2;
+    
+    // Se il frame individuato non è ancora arrivato del tutto, usciamo dal ciclo 
+    // e aspettiamo che la seriale riceva i byte mancanti nei prossimi millisecondi
+    if (global_rx_buffer.size() < frame_len) {
+      return; 
+    }
+    
+    // Il frame in testa alla coda è completo. Verifichiamo se appartiene a QUESTA istanza
+    if (addr == this->address_) {
+      const uint8_t *data = &global_rx_buffer[3];
       
-      uint8_t byte_count = global_rx_buffer[i+2];
-      
-      // Accettiamo solo i due formati validi del Seplos V3 (36 byte o 52 byte di dati)
-      if (byte_count != 0x34 && byte_count != 0x24) {
-        continue; 
-      }
-
-      size_t frame_len = 3 + byte_count + 2; // Header (3) + Dati (byte_count) + CRC (2)
-      
-      // Se il frame non è completo nel buffer, aspettiamo che finisca di arrivare
-      if (global_rx_buffer.size() < i + frame_len) {
-        return; 
-      }
-
-      // Puntatore all'inizio dei dati utili del pacchetto corrente
-      const uint8_t *data = &global_rx_buffer[i + 3];
-
       if (byte_count == 0x34) {
         // -------------------------------------------------------------
-        // FRAME DA 52 BYTE: Lettura di Tensioni Celle e Temperature
+        // PACCHETTO DA 52 BYTE: Tensioni Celle e Temperature
         // -------------------------------------------------------------
         
         // 1. Decodifica Tensioni Celle (16 celle = 32 byte)
@@ -68,7 +73,7 @@ void _SeplosV3::parse_buffer_() {
           }
         }
 
-        // 2. Decodifica Temperature Sonde Celle (4 sonde = 8 byte, parte da offset 32)
+        // 2. Decodifica Temperature (4 sonde = 8 byte, parte da offset 32)
         size_t temp_offset = 32; 
         for (size_t t = 0; t < 4; t++) {
           if (this->cell_temp_sensors_[t] != nullptr) {
@@ -80,7 +85,7 @@ void _SeplosV3::parse_buffer_() {
       } 
       else if (byte_count == 0x24) {
         // -------------------------------------------------------------
-        // FRAME DA 36 BYTE: Lettura Dati Generali del Pacco Batteria
+        // PACCHETTO DA 36 BYTE: Stato Generale del Pacco Batteria
         // -------------------------------------------------------------
         
         // 1. Tensione Totale del Pacco (offset 0)
@@ -89,7 +94,7 @@ void _SeplosV3::parse_buffer_() {
           this->pack_voltage_sensor_->publish_state(raw_voltage / 100.0f);
         }
 
-        // 2. Corrente Batteria (offset 2, con segno per carica/scarica)
+        // 2. Corrente Batteria (offset 2, con segno +/-)
         if (this->current_sensor_ != nullptr) {
           int16_t raw_current = (data[2] << 8) | data[3];
           this->current_sensor_->publish_state(raw_current / 100.0f);
@@ -103,8 +108,13 @@ void _SeplosV3::parse_buffer_() {
         }
       }
 
-      // Rimuoviamo il frame elaborato e l'eventuale sporcizia precedente dal buffer globale
-      global_rx_buffer.erase(global_rx_buffer.begin(), global_rx_buffer.begin() + i + frame_len);
+      // Rimuoviamo dalla coda globale solo ed esclusivamente il pacchetto appena elaborato
+      global_rx_buffer.erase(global_rx_buffer.begin(), global_rx_buffer.begin() + frame_len);
+      
+    } else {
+      // Il pacchetto in cima alla coda è valido ma appartiene all'ALTRO BMS.
+      // Usciamo immediatamente da questo ciclo per permettere all'altra istanza 
+      // di intercettarlo ed elaborarlo senza rischiare di cancellarlo.
       return;
     }
   }
