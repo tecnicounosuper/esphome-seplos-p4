@@ -9,7 +9,7 @@ namespace seplos_parser {
 
 static const char *TAG = "seplos_parser.component";
 
-// Algoritmo standard CRC16 Modbus
+// Calcolo CRC16 Standard Modbus per validazione pacchetti
 uint16_t chk_crc16(const uint8_t *data, uint16_t len) {
   uint16_t crc = 0xFFFF;
   for (uint16_t i = 0; i < len; i++) {
@@ -108,6 +108,7 @@ void SeplosParser::loop() {
     buffer.push_back(byte);
 
     if (buffer.size() >= 3) {
+      // Accetta indirizzi Modbus da 0x01 a 0x10 (BMS multipli in cascata)
       if (buffer[0] < 0x01 || buffer[0] > 0x10) {
         buffer.pop_front();
         continue;
@@ -124,6 +125,7 @@ void SeplosParser::loop() {
           process_packet();
           buffer.erase(buffer.begin(), buffer.begin() + expected_len);
         } else {
+          // In caso di errore CRC scarta solo il primo byte per ritrovare l'allineamento
           buffer.pop_front();
         }
       }
@@ -135,14 +137,20 @@ size_t SeplosParser::get_expected_length() {
   uint8_t func = buffer[1];
   uint8_t byte_count = buffer[2];
   
-  if ((func == 0x03 || func == 0x04) && byte_count == 0x24) return 41;
-  if ((func == 0x03 || func == 0x04) && byte_count == 0x34) return 57;
-  if (func == 0x01 && byte_count == 0x12) return 23;
+  if (func == 0x04 || func == 0x03) {
+    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5 overhead)
+    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5 overhead)
+    if (byte_count == 0x10) return 21; // Min/Max e Limiti Corrente (16 byte + 5 overhead)
+  }
+  if (func == 0x01) {
+    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5 overhead)
+  }
   return 0;
 }
 
 bool SeplosParser::validate_crc() {
   size_t len = get_expected_length();
+  if (len == 0 || buffer.size() < len) return false;
   std::vector<uint8_t> local_data(buffer.begin(), buffer.begin() + len);
   uint16_t computed_crc = chk_crc16(local_data.data(), len - 2);
   uint16_t received_crc = (local_data[len - 1] << 8) | local_data[len - 2];
@@ -161,12 +169,15 @@ bool SeplosParser::should_update(int bms_index) {
 
 void SeplosParser::process_packet() {
   int bms_index = buffer[0] - 0x01;
-  if (!should_update(bms_index)) return;
+  if (bms_index < 0 || bms_index >= bms_count_) return;
 
   uint8_t function_code = buffer[1];
   uint8_t byte_count = buffer[2];
 
+  // 1. BLOCCO GENERALI (36 Byte)
   if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x24) {
+    if (!should_update(bms_index)) return;
+
     float volt = ((buffer[3] << 8) | buffer[4]) * 0.01f;
     float curr = ((int16_t)((buffer[5] << 8) | buffer[6])) * 0.01f;
     float rem_cap = ((buffer[7] << 8) | buffer[8]) * 0.01f;
@@ -189,9 +200,10 @@ void SeplosParser::process_packet() {
     if (average_cell_voltage_[bms_index]) average_cell_voltage_[bms_index]->publish_state(avg_cell_v);
     if (average_cell_temp_[bms_index]) average_cell_temp_[bms_index]->publish_state(avg_cell_t);
     
-    ESP_LOGI(TAG, "Aggiornato BMS %d - V: %.2f, A: %.2f, SOC: %.1f%%", bms_index, volt, curr, soc_val);
+    ESP_LOGD(TAG, "BMS %d - Dati Generali Elaborati", bms_index);
   }
 
+  // 2. BLOCCO CELLE E TEMPERATURE (52 Byte)
   if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x34) {
     int idx = 3;
     for (int c = 0; c < 16; c++) {
@@ -204,7 +216,59 @@ void SeplosParser::process_packet() {
       if (temps_[t][bms_index]) temps_[t][bms_index]->publish_state(temp_v);
       idx += 2;
     }
-    ESP_LOGI(TAG, "Aggiornate Celle e Temperature BMS %d", bms_index);
+    ESP_LOGD(TAG, "BMS %d - Celle e Temperature Elaborate", bms_index);
+  }
+
+  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI (16 Byte) -> Risolve i valori "NA"
+  if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x10) {
+    float delta_v = ((buffer[3] << 8) | buffer[4]) * 0.001f;
+    float max_v = ((buffer[5] << 8) | buffer[6]) * 0.001f;
+    float min_v = ((buffer[7] << 8) | buffer[8]) * 0.001f;
+    
+    float max_chg = ((buffer[9] << 8) | buffer[10]) * 0.1f;
+    float max_dis = ((buffer[11] << 8) | buffer[12]) * 0.1f;
+    
+    float t_max = (((buffer[13] << 8) | buffer[14]) - 2731) * 0.1f;
+    float t_min = (((buffer[15] << 8) | buffer[16]) - 2731) * 0.1f;
+
+    if (delta_cell_voltage_[bms_index]) delta_cell_voltage_[bms_index]->publish_state(delta_v);
+    if (max_cell_voltage_[bms_index]) max_cell_voltage_[bms_index]->publish_state(max_v);
+    if (min_cell_voltage_[bms_index]) min_cell_voltage_[bms_index]->publish_state(min_v);
+    if (maxchgcurt_[bms_index]) maxchgcurt_[bms_index]->publish_state(max_chg);
+    if (maxdiscurt_[bms_index]) maxdiscurt_[bms_index]->publish_state(max_dis);
+    if (max_cell_temp_[bms_index]) max_cell_temp_[bms_index]->publish_state(t_max);
+    if (min_cell_temp_[bms_index]) min_cell_temp_[bms_index]->publish_state(t_min);
+
+    // Temp ambiente fittizia o di servizio ricavabile dai range
+    if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(t_min); 
+
+    ESP_LOGD(TAG, "BMS %d - Min/Max e Limiti Corrente Aggiornati", bms_index);
+  }
+
+  // 4. BLOCCO COILS / STATO ALLARMI E FET (18 Byte) -> Risolve Allarmi e System Status
+  if (function_code == 0x01 && byte_count == 0x12) {
+    bool has_warning = false;
+    // Controlla i byte degli allarmi per verificare anomalie latenti
+    for (int i = 3; i < 15; i++) {
+      if (buffer[i] != 0x00) {
+        has_warning = true;
+        break;
+      }
+    }
+
+    if (system_status_[bms_index]) {
+      system_status_[bms_index]->publish_state(has_warning ? "Allarme / Protezione" : "Normale");
+    }
+
+    // Decodifica preliminare degli allarmi attivi in formato testo semplice
+    if (active_alarm_[bms_index]) {
+      if (has_warning) {
+        active_alarm_[bms_index]->publish_state("Attivo (Vedi BMS)");
+      } else {
+        active_alarm_[bms_index]->publish_state("Nessuno");
+      }
+    }
+    ESP_LOGD(TAG, "BMS %d - Stato Allarmi Elaborato", bms_index);
   }
 }
 
