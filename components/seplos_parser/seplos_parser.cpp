@@ -136,13 +136,13 @@ size_t SeplosParser::get_expected_length() {
   uint8_t byte_count = buffer[2];
   
   if (func == 0x04 || func == 0x03) {
-    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5 overhead)
-    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5 overhead)
-    if (byte_count == 0x11) return 22; // <-- COLPITO! Min/Max e Limiti Seplos V3 (17 byte + 5 overhead = 22)
-    if (byte_count == 0x10) return 21; // Standard precedente (16 byte + 5 overhead)
+    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5)
+    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5)
+    if (byte_count == 0x11) return 22; // Min/Max Seplos V3 (17 byte + 5)
+    if (byte_count == 0x10) return 21; // Min/Max Standard precedente (16 byte + 5)
   }
   if (func == 0x01) {
-    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5 overhead)
+    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5)
   }
   return 0;
 }
@@ -215,29 +215,33 @@ void SeplosParser::process_packet() {
     }
   }
 
-  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI (17 o 16 Byte) -> ADATTATO PER SEPLOS V3
+  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI - ALLINEAMENTO AGGIORNATO E SISTEMATO
   if ((function_code == 0x03 || function_code == 0x04) && (byte_count == 0x11 || byte_count == 0x10)) {
-    float delta_v = ((buffer[3] << 8) | buffer[4]) * 0.001f;
-    float max_v   = ((buffer[5] << 8) | buffer[6]) * 0.001f;
-    float min_v   = ((buffer[7] << 8) | buffer[8]) * 0.001f;
-    
-    float max_chg = ((buffer[9] << 8) | buffer[10]) * 0.1f;
-    float max_dis = ((buffer[11] << 8) | buffer[12]) * 0.1f;
-    
-    float t_max   = (((buffer[13] << 8) | buffer[14]) - 2731) * 0.1f;
-    float t_min   = (((buffer[15] << 8) | buffer[16]) - 2731) * 0.1f;
+    // Offset di allineamento: se ci sono 17 byte (0x11), saltiamo il primo byte di allineamento interno per riallineare i registri numerici
+    int offset = (byte_count == 0x11) ? 1 : 0;
 
-    if (delta_cell_voltage_[bms_index]) delta_cell_voltage_[bms_index]->publish_state(delta_v);
-    if (max_cell_voltage_[bms_index]) max_cell_voltage_[bms_index]->publish_state(max_v);
-    if (min_cell_voltage_[bms_index]) min_cell_voltage_[bms_index]->publish_state(min_v);
-    if (maxchgcurt_[bms_index]) maxchgcurt_[bms_index]->publish_state(max_chg);
-    if (maxdiscurt_[bms_index]) maxdiscurt_[bms_index]->publish_state(max_dis);
-    if (max_cell_temp_[bms_index]) max_cell_temp_[bms_index]->publish_state(t_max);
-    if (min_cell_temp_[bms_index]) min_cell_temp_[bms_index]->publish_state(t_min);
+    float delta_v = ((buffer[3 + offset] << 8) | buffer[4 + offset]) * 0.001f;
+    float max_v   = ((buffer[5 + offset] << 8) | buffer[6 + offset]) * 0.001f;
+    float min_v   = ((buffer[7 + offset] << 8) | buffer[8 + offset]) * 0.001f;
     
-    // Popola anche le restanti temperature fisse di controllo
-    if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(t_min);
-    if (power_temp_[bms_index]) power_temp_[bms_index]->publish_state(t_max);
+    float max_chg = ((buffer[9 + offset] << 8) | buffer[10 + offset]) * 0.1f;
+    float max_dis = ((buffer[11 + offset] << 8) | buffer[12 + offset]) * 0.1f;
+    
+    float t_max   = (((buffer[13 + offset] << 8) | buffer[14 + offset]) - 2731) * 0.1f;
+    float t_min   = (((buffer[15 + offset] << 8) | buffer[16 + offset]) - 2731) * 0.1f;
+
+    // Sanity check per scartare letture spurie o palesemente fuori range
+    if (max_v > 0.0f && max_v < 5.0f && min_v > 0.0f && min_v < 5.0f) {
+      if (delta_cell_voltage_[bms_index]) delta_cell_voltage_[bms_index]->publish_state(delta_v);
+      if (max_cell_voltage_[bms_index]) max_cell_voltage_[bms_index]->publish_state(max_v);
+      if (min_cell_voltage_[bms_index]) min_cell_voltage_[bms_index]->publish_state(min_v);
+      if (maxchgcurt_[bms_index]) maxchgcurt_[bms_index]->publish_state(max_chg);
+      if (maxdiscurt_[bms_index]) maxdiscurt_[bms_index]->publish_state(max_dis);
+      if (max_cell_temp_[bms_index]) max_cell_temp_[bms_index]->publish_state(t_max);
+      if (min_cell_temp_[bms_index]) min_cell_temp_[bms_index]->publish_state(t_min);
+      if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(t_min);
+      if (power_temp_[bms_index]) power_temp_[bms_index]->publish_state(t_max);
+    }
   }
 
   // 4. BLOCCO COILS / STATO ALLARMI E FET (18 Byte)
@@ -276,7 +280,7 @@ void SeplosParser::set_bms_count(int bms_count) {
 }
 
 void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval_ = update_interval * 1000;
+  this->update_interval = update_interval * 1000;
 }
 
 }  // namespace seplos_parser
