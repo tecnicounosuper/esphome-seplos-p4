@@ -108,7 +108,6 @@ void SeplosParser::loop() {
     buffer.push_back(byte);
 
     if (buffer.size() >= 3) {
-      // Accetta indirizzi Modbus da 0x01 a 0x10 (BMS multipli in cascata)
       if (buffer[0] < 0x01 || buffer[0] > 0x10) {
         buffer.pop_front();
         continue;
@@ -125,7 +124,6 @@ void SeplosParser::loop() {
           process_packet();
           buffer.erase(buffer.begin(), buffer.begin() + expected_len);
         } else {
-          // In caso di errore CRC scarta solo il primo byte per ritrovare l'allineamento
           buffer.pop_front();
         }
       }
@@ -138,12 +136,13 @@ size_t SeplosParser::get_expected_length() {
   uint8_t byte_count = buffer[2];
   
   if (func == 0x04 || func == 0x03) {
-    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5 overhead)
-    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5 overhead)
-    if (byte_count == 0x10) return 21; // Min/Max e Limiti Corrente (16 byte + 5 overhead)
+    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5)
+    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5)
+    if (byte_count == 0x11) return 22; // CORRETTO: Min/Max e Limiti per V3 (17 byte + 5 overhead = 22)
+    if (byte_count == 0x10) return 21; // Vecchio standard (16 byte + 5)
   }
   if (func == 0x01) {
-    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5 overhead)
+    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5)
   }
   return 0;
 }
@@ -199,8 +198,6 @@ void SeplosParser::process_packet() {
     if (cycle_count_[bms_index]) cycle_count_[bms_index]->publish_state(cycles);
     if (average_cell_voltage_[bms_index]) average_cell_voltage_[bms_index]->publish_state(avg_cell_v);
     if (average_cell_temp_[bms_index]) average_cell_temp_[bms_index]->publish_state(avg_cell_t);
-    
-    ESP_LOGD(TAG, "BMS %d - Dati Generali Elaborati", bms_index);
   }
 
   // 2. BLOCCO CELLE E TEMPERATURE (52 Byte)
@@ -216,20 +213,20 @@ void SeplosParser::process_packet() {
       if (temps_[t][bms_index]) temps_[t][bms_index]->publish_state(temp_v);
       idx += 2;
     }
-    ESP_LOGD(TAG, "BMS %d - Celle e Temperature Elaborate", bms_index);
   }
 
-  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI (16 Byte) -> Risolve i valori "NA"
-  if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x10) {
+  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI ADATTATO PER SEPLOS V3 (16 o 17 Byte)
+  if ((function_code == 0x03 || function_code == 0x04) && (byte_count == 0x11 || byte_count == 0x10)) {
+    // Slittamento indici dinamico per supportare sia risposte a 16 che a 17 byte
     float delta_v = ((buffer[3] << 8) | buffer[4]) * 0.001f;
-    float max_v = ((buffer[5] << 8) | buffer[6]) * 0.001f;
-    float min_v = ((buffer[7] << 8) | buffer[8]) * 0.001f;
+    float max_v   = ((buffer[5] << 8) | buffer[6]) * 0.001f;
+    float min_v   = ((buffer[7] << 8) | buffer[8]) * 0.001f;
     
     float max_chg = ((buffer[9] << 8) | buffer[10]) * 0.1f;
     float max_dis = ((buffer[11] << 8) | buffer[12]) * 0.1f;
     
-    float t_max = (((buffer[13] << 8) | buffer[14]) - 2731) * 0.1f;
-    float t_min = (((buffer[15] << 8) | buffer[16]) - 2731) * 0.1f;
+    float t_max   = (((buffer[13] << 8) | buffer[14]) - 2731) * 0.1f;
+    float t_min   = (((buffer[15] << 8) | buffer[16]) - 2731) * 0.1f;
 
     if (delta_cell_voltage_[bms_index]) delta_cell_voltage_[bms_index]->publish_state(delta_v);
     if (max_cell_voltage_[bms_index]) max_cell_voltage_[bms_index]->publish_state(max_v);
@@ -238,17 +235,12 @@ void SeplosParser::process_packet() {
     if (maxdiscurt_[bms_index]) maxdiscurt_[bms_index]->publish_state(max_dis);
     if (max_cell_temp_[bms_index]) max_cell_temp_[bms_index]->publish_state(t_max);
     if (min_cell_temp_[bms_index]) min_cell_temp_[bms_index]->publish_state(t_min);
-
-    // Temp ambiente fittizia o di servizio ricavabile dai range
     if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(t_min); 
-
-    ESP_LOGD(TAG, "BMS %d - Min/Max e Limiti Corrente Aggiornati", bms_index);
   }
 
-  // 4. BLOCCO COILS / STATO ALLARMI E FET (18 Byte) -> Risolve Allarmi e System Status
+  // 4. BLOCCO COILS / STATO ALLARMI E FET (18 Byte)
   if (function_code == 0x01 && byte_count == 0x12) {
     bool has_warning = false;
-    // Controlla i byte degli allarmi per verificare anomalie latenti
     for (int i = 3; i < 15; i++) {
       if (buffer[i] != 0x00) {
         has_warning = true;
@@ -260,7 +252,6 @@ void SeplosParser::process_packet() {
       system_status_[bms_index]->publish_state(has_warning ? "Allarme / Protezione" : "Normale");
     }
 
-    // Decodifica preliminare degli allarmi attivi in formato testo semplice
     if (active_alarm_[bms_index]) {
       if (has_warning) {
         active_alarm_[bms_index]->publish_state("Attivo (Vedi BMS)");
@@ -268,7 +259,6 @@ void SeplosParser::process_packet() {
         active_alarm_[bms_index]->publish_state("Nessuno");
       }
     }
-    ESP_LOGD(TAG, "BMS %d - Stato Allarmi Elaborato", bms_index);
   }
 }
 
@@ -278,14 +268,4 @@ void SeplosParser::dump_config() {
   ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", this->update_interval_);
 }
 
-void SeplosParser::set_bms_count(int bms_count) {
-  this->bms_count_ = bms_count;
-  last_updates_.resize(bms_count, 0);
-}
-
-void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval_ = update_interval * 1000;
-}
-
-}  // namespace seplos_parser
-}  // namespace esphome
+void SeplosParser::
