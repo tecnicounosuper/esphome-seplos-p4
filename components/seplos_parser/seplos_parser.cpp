@@ -136,13 +136,13 @@ size_t SeplosParser::get_expected_length() {
   uint8_t byte_count = buffer[2];
   
   if (func == 0x04 || func == 0x03) {
-    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5)
-    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5)
-    if (byte_count == 0x11) return 22; // CORRETTO: Min/Max e Limiti per V3 (17 byte + 5 overhead = 22)
-    if (byte_count == 0x10) return 21; // Vecchio standard (16 byte + 5)
+    if (byte_count == 0x24) return 41; // Dati generali (36 byte + 5 overhead)
+    if (byte_count == 0x34) return 57; // Tensioni celle e Temp (52 byte + 5 overhead)
+    if (byte_count == 0x11) return 22; // <-- COLPITO! Min/Max e Limiti Seplos V3 (17 byte + 5 overhead = 22)
+    if (byte_count == 0x10) return 21; // Standard precedente (16 byte + 5 overhead)
   }
   if (func == 0x01) {
-    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5)
+    if (byte_count == 0x12) return 23; // Allarmi e Stato FET (18 byte + 5 overhead)
   }
   return 0;
 }
@@ -215,9 +215,8 @@ void SeplosParser::process_packet() {
     }
   }
 
-  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI ADATTATO PER SEPLOS V3 (16 o 17 Byte)
+  // 3. BLOCCO MIN/MAX E LIMITI DINAMICI (17 o 16 Byte) -> ADATTATO PER SEPLOS V3
   if ((function_code == 0x03 || function_code == 0x04) && (byte_count == 0x11 || byte_count == 0x10)) {
-    // Slittamento indici dinamico per supportare sia risposte a 16 che a 17 byte
     float delta_v = ((buffer[3] << 8) | buffer[4]) * 0.001f;
     float max_v   = ((buffer[5] << 8) | buffer[6]) * 0.001f;
     float min_v   = ((buffer[7] << 8) | buffer[8]) * 0.001f;
@@ -235,7 +234,10 @@ void SeplosParser::process_packet() {
     if (maxdiscurt_[bms_index]) maxdiscurt_[bms_index]->publish_state(max_dis);
     if (max_cell_temp_[bms_index]) max_cell_temp_[bms_index]->publish_state(t_max);
     if (min_cell_temp_[bms_index]) min_cell_temp_[bms_index]->publish_state(t_min);
-    if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(t_min); 
+    
+    // Popola anche le restanti temperature fisse di controllo
+    if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(t_min);
+    if (power_temp_[bms_index]) power_temp_[bms_index]->publish_state(t_max);
   }
 
   // 4. BLOCCO COILS / STATO ALLARMI E FET (18 Byte)
