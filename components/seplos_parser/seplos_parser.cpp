@@ -27,7 +27,6 @@ uint16_t chk_crc16(const uint8_t *data, uint16_t len) {
 void SeplosParser::setup() {
   ESP_LOGI(TAG, "Inizializzazione Sniffer Seplos V3 per %d BMS...", this->bms_count_);
 
-  // Ridimensionamento dei vettori in base al numero di BMS
   pack_voltage_.resize(bms_count_, nullptr);
   current_.resize(bms_count_, nullptr);
   remaining_capacity_.resize(bms_count_, nullptr);
@@ -53,7 +52,6 @@ void SeplosParser::setup() {
   cells_.resize(16, std::vector<sensor::Sensor *>(bms_count_, nullptr));
   temps_.resize(4, std::vector<sensor::Sensor *>(bms_count_, nullptr));
 
-  // Mappatura automatica dei sensori standard tramite stringa del nome
   map_sensor_vector(pack_voltage_, "pack_voltage");
   map_sensor_vector(current_, "current");
   map_sensor_vector(remaining_capacity_, "remaining_capacity");
@@ -74,7 +72,6 @@ void SeplosParser::setup() {
   map_sensor_vector(case_temp_, "case_temp");
   map_sensor_vector(power_temp_, "power_temp");
 
-  // Mappatura dinamica delle 16 celle e 4 temperature
   for (int c = 0; c < 16; c++) {
     map_sensor_vector(cells_[c], "cell_" + std::to_string(c + 1));
   }
@@ -82,10 +79,9 @@ void SeplosParser::setup() {
     map_sensor_vector(temps_[t], "cell_temp_" + std::to_string(t + 1));
   }
 
-  // Mappatura dei Text Sensor per lo stato del sistema e allarmi
   for (int i = 0; i < bms_count_; i++) {
     std::string expected_status = "bms" + std::to_string(i) + " system_status";
-    std::string expected_alarm = "bms" + std::to_string(i) + " active_alarm";
+    std::string expected_alarm = "bms" + std::to_string(i) + " active_alarms";
     for (auto *ts : this->text_sensors_) {
       if (ts->get_name() == expected_status) system_status_[i] = ts;
       if (ts->get_name() == expected_alarm) active_alarm_[i] = ts;
@@ -110,7 +106,6 @@ void SeplosParser::loop() {
     this->read_byte(&byte);
     buffer.push_back(byte);
 
-    // Controlla se abbiamo un header potenziale (Address valido 0x01-0x10)
     if (buffer.size() >= 3) {
       if (buffer[0] < 0x01 || buffer[0] > 0x10) {
         buffer.pop_front();
@@ -119,19 +114,15 @@ void SeplosParser::loop() {
 
       size_t expected_len = get_expected_length();
       if (expected_len == 0) {
-        // Se il codice funzione o il byte count non corrispondono a un pacchetto noto, scarta il primo byte
         buffer.pop_front();
         continue;
       }
 
-      // Se abbiamo accumulato l'intera lunghezza prevista per il pacchetto
       if (buffer.size() >= expected_len) {
         if (validate_crc()) {
           process_packet();
-          // Rimuove il pacchetto elaborato dal buffer
           buffer.erase(buffer.begin(), buffer.begin() + expected_len);
         } else {
-          // CRC fallito: rimuove solo il primo byte per cercare un nuovo allineamento
           buffer.pop_front();
         }
       }
@@ -140,12 +131,13 @@ void SeplosParser::loop() {
 }
 
 size_t SeplosParser::get_expected_length() {
-  // Funzione 0x03, Byte Count 0x24 (41 byte totali: 3 header + 36 dati + 2 CRC)
-  if (buffer[1] == 0x03 && buffer[2] == 0x24) return 41;
-  // Funzione 0x03, Byte Count 0x34 (57 byte totali: 3 header + 52 dati + 2 CRC)
-  if (buffer[1] == 0x03 && buffer[2] == 0x34) return 57;
-  // Funzione 0x01 o allarmi con lunghezze specifiche (es. 18 byte dati -> 23 totali)
-  if (buffer[1] == 0x01 && buffer[2] == 0x12) return 23;
+  uint8_t func = buffer[1];
+  uint8_t byte_count = buffer[2];
+  
+  // FIX: Accettiamo la funzione 0x04 usata dal tuo sistema!
+  if ((func == 0x03 || func == 0x04) && byte_count == 0x24) return 41;
+  if ((func == 0x03 || func == 0x04) && byte_count == 0x34) return 57;
+  if (func == 0x01 && byte_count == 0x12) return 23;
   return 0;
 }
 
@@ -174,8 +166,8 @@ void SeplosParser::process_packet() {
   uint8_t function_code = buffer[1];
   uint8_t byte_count = buffer[2];
 
-  // TELEMETRIA GENERALE (Funzione 0x03, 36 Byte Dati)
-  if (function_code == 0x03 && byte_count == 0x24) {
+  // TELEMETRIA GENERALE (36 Byte Dati)
+  if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x24) {
     float volt = ((buffer[3] << 8) | buffer[4]) * 0.01f;
     float curr = ((int16_t)((buffer[5] << 8) | buffer[6])) * 0.01f;
     float rem_cap = ((buffer[7] << 8) | buffer[8]) * 0.01f;
@@ -197,40 +189,17 @@ void SeplosParser::process_packet() {
     if (cycle_count_[bms_index]) cycle_count_[bms_index]->publish_state(cycles);
     if (average_cell_voltage_[bms_index]) average_cell_voltage_[bms_index]->publish_state(avg_cell_v);
     if (average_cell_temp_[bms_index]) average_cell_temp_[bms_index]->publish_state(avg_cell_t);
+    
+    ESP_LOGI(TAG, "Aggiornato BMS %d - V: %.2f, A: %.2f, SOC: %.1f%%", bms_index, volt, curr, soc_val);
   }
 
-  // TELEMETRIA CELLE (Funzione 0x03, 52 Byte Dati)
-  if (function_code == 0x03 && byte_count == 0x34) {
-    // Parsing Voltages Celle 1-16
+  // TELEMETRIA CELLE (52 Byte Dati)
+  if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x34) {
     int idx = 3;
     for (int c = 0; c < 16; c++) {
       float cell_v = ((buffer[idx] << 8) | buffer[idx + 1]) * 0.001f;
       if (cells_[c][bms_index]) cells_[c][bms_index]->publish_state(cell_v);
       idx += 2;
     }
-    // Parsing Temperature NTC 1-4
     for (int t = 0; t < 4; t++) {
-      float temp_v = (((buffer[idx] << 8) | buffer[idx + 1]) - 2731) * 0.1f;
-      if (temps_[t][bms_index]) temps_[t][bms_index]->publish_state(temp_v);
-      idx += 2;
-    }
-  }
-}
-
-void SeplosParser::dump_config() {
-  ESP_LOGCONFIG(TAG, "Sniffer Seplos Parser:");
-  ESP_LOGCONFIG(TAG, "  BMS Count: %d", this->bms_count_);
-  ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", this->update_interval_);
-}
-
-void SeplosParser::set_bms_count(int bms_count) {
-  this->bms_count_ = bms_count;
-  last_updates_.resize(bms_count, 0);
-}
-
-void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval_ = update_interval * 1000;
-}
-
-}  // namespace seplos_parser
-}  // namespace esphome
+      float temp_v = (((buffer[idx] << 8) | buffer[idx + 1]) - 2
