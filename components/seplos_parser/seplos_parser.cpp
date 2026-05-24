@@ -268,4 +268,14 @@ void SeplosParser::dump_config() {
   ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", this->update_interval_);
 }
 
-void SeplosParser::
+void SeplosParser::set_bms_count(int bms_count) {
+  this->bms_count_ = bms_count;
+  last_updates_.resize(bms_count, 0);
+}
+
+void SeplosParser::set_update_interval(int update_interval) {
+  this->update_interval_ = update_interval * 1000;
+}
+
+}  // namespace seplos_parser
+}  // namespace esphome
