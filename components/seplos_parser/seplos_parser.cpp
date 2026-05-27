@@ -62,8 +62,8 @@ void SeplosParser::setup() {
   map_sensor_vector(cycle_count_, "cycle_count");
   map_sensor_vector(average_cell_voltage_, "average_cell_voltage");
   map_sensor_vector(average_cell_temp_, "average_cell_temp");
-  map_sensor_voltage_minmax(max_cell_voltage_, "max_cell_voltage");
-  map_sensor_voltage_minmax(min_cell_voltage_, "min_cell_voltage");
+  map_sensor_vector(max_cell_voltage_, "max_cell_voltage");
+  map_sensor_vector(min_cell_voltage_, "min_cell_voltage");
   map_sensor_vector(delta_cell_voltage_, "delta_cell_voltage");
   map_sensor_vector(max_cell_temp_, "max_cell_temp");
   map_sensor_vector(min_cell_temp_, "min_cell_temp");
@@ -90,17 +90,6 @@ void SeplosParser::setup() {
 }
 
 void SeplosParser::map_sensor_vector(std::vector<sensor::Sensor *> &vec, const std::string &name) {
-  for (int i = 0; i < bms_count_; i++) {
-    std::string expected_name = "bms" + std::to_string(i) + " " + name;
-    for (auto *sensor : this->sensors_) {
-      if (sensor->get_name() == expected_name) {
-        vec[i] = sensor;
-      }
-    }
-  }
-}
-
-void SeplosParser::map_sensor_voltage_minmax(std::vector<sensor::Sensor *> &vec, const std::string &name) {
   for (int i = 0; i < bms_count_; i++) {
     std::string expected_name = "bms" + std::to_string(i) + " " + name;
     for (auto *sensor : this->sensors_) {
@@ -234,13 +223,11 @@ void SeplosParser::process_packet() {
       idx += 2;
     }
 
-    // Pubblica i minimi e massimi reali calcolati direttamente sulle celle ricevute
     if (max_cell_voltage_[bms_index]) max_cell_voltage_[bms_index]->publish_state(max_c_v);
     if (min_cell_voltage_[bms_index]) min_cell_voltage_[bms_index]->publish_state(min_c_v);
     if (max_cell_temp_[bms_index]) max_cell_temp_[bms_index]->publish_state(max_t_v);
     if (min_cell_temp_[bms_index]) min_cell_temp_[bms_index]->publish_state(min_t_v);
     
-    // Forniamo le temperature di controllo fisse basandoci sui reali sensori
     if (case_temp_[bms_index]) case_temp_[bms_index]->publish_state(min_t_v);
     if (power_temp_[bms_index]) power_temp_[bms_index]->publish_state(max_t_v);
   }
@@ -294,7 +281,7 @@ void SeplosParser::set_bms_count(int bms_count) {
 }
 
 void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval_ = update_interval * 1000;
+  this->update_interval = update_interval * 1000;
 }
 
 }  // namespace seplos_parser
