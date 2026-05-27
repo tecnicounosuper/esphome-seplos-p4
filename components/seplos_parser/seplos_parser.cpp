@@ -281,7 +281,7 @@ void SeplosParser::set_bms_count(int bms_count) {
 }
 
 void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval = update_interval * 1000;
+  this->update_interval_ = update_interval * 1000; // <-- Trattino basso corretto qui!
 }
 
 }  // namespace seplos_parser
