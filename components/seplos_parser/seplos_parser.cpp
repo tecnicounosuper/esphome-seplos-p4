@@ -49,17 +49,13 @@ void SeplosParser::setup() {
   system_status_.resize(bms_count_, nullptr);
   active_alarm_.resize(bms_count_, nullptr);
 
-  // Sensori Binari MOSFET
   chg_mos_status_.resize(bms_count_, nullptr);
   dischg_mos_status_.resize(bms_count_, nullptr);
 
   cells_.resize(16, std::vector<sensor::Sensor *>(bms_count_, nullptr));
   temps_.resize(4, std::vector<sensor::Sensor *>(bms_count_, nullptr));
-  
-  // Matrice sensori binari bilanciamento (16 celle x N BMS)
   balancing_status_.resize(16, std::vector<binary_sensor::BinarySensor *>(bms_count_, nullptr));
 
-  // Mappatura Sensori Analogici
   map_sensor_vector(pack_voltage_, "pack_voltage");
   map_sensor_vector(current_, "current");
   map_sensor_vector(remaining_capacity_, "remaining_capacity");
@@ -87,7 +83,6 @@ void SeplosParser::setup() {
     map_sensor_vector(temps_[t], "cell_temp_" + std::to_string(t + 1));
   }
 
-  // Mappatura Text Sensors
   for (int i = 0; i < bms_count_; i++) {
     std::string expected_status = "bms" + std::to_string(i) + " system_status";
     std::string expected_alarm = "bms" + std::to_string(i) + " active_alarms";
@@ -96,7 +91,6 @@ void SeplosParser::setup() {
       if (ts->get_name() == expected_alarm) active_alarm_[i] = ts;
     }
 
-    // Mappatura Sensori Binari MOSFET interni
     std::string expected_chg = "bms" + std::to_string(i) + " mos_carica";
     std::string expected_dis = "bms" + std::to_string(i) + " mos_scarica";
     for (auto *bs : this->binary_sensors_) {
@@ -104,7 +98,6 @@ void SeplosParser::setup() {
       if (bs->get_name() == expected_dis) dischg_mos_status_[i] = bs;
     }
 
-    // Mappatura Sensori Binari Bilanciamento Celle
     for (int c = 0; c < 16; c++) {
       std::string expected_bal = "bms" + std::to_string(i) + " cella_" + std::to_string(c + 1) + "_bilanciamento";
       for (auto *bs : this->binary_sensors_) {
@@ -166,6 +159,9 @@ size_t SeplosParser::get_expected_length() {
     if (byte_count == 0x34) return 57; 
     if (byte_count == 0x11) return 22; 
     if (byte_count == 0x10) return 21; 
+    // Aggiunto supporto flessibile per altre varianti di byte_count dei limiti
+    if (byte_count == 0x0E) return 19;
+    if (byte_count == 0x06) return 11;
   }
   if (func == 0x01) {
     if (byte_count == 0x12) return 23; 
@@ -199,7 +195,6 @@ void SeplosParser::process_packet() {
   uint8_t function_code = buffer[1];
   uint8_t byte_count = buffer[2];
 
-  // 1. BLOCCO GENERALI (36 Byte)
   if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x24) {
     if (!should_update(bms_index)) return;
 
@@ -226,7 +221,6 @@ void SeplosParser::process_packet() {
     if (average_cell_temp_[bms_index]) average_cell_temp_[bms_index]->publish_state(avg_cell_t);
   }
 
-  // 2. BLOCCO CELLE E TEMPERATURE (52 Byte)
   if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x34) {
     int idx = 3;
     float min_c_v = 5.0f;
@@ -260,17 +254,31 @@ void SeplosParser::process_packet() {
     if (power_temp_[bms_index]) power_temp_[bms_index]->publish_state(max_t_v);
   }
 
-  // 3. BLOCCO SOGLIE E LIMITI DINAMICI
-  if ((function_code == 0x03 || function_code == 0x04) && (byte_count == 0x11 || byte_count == 0x10)) {
-    int offset = (byte_count == 0x11) ? 1 : 0;
-    float max_chg = ((buffer[9 + offset] << 8) | buffer[10 + offset]) * 0.1f;
-    float max_dis = ((buffer[11 + offset] << 8) | buffer[12 + offset]) * 0.1f;
+  // MIGLIORIA: Riconoscimento ed estrazione ottimizzata per limiti di corrente dinamici
+  if ((function_code == 0x03 || function_code == 0x04) && 
+      (byte_count == 0x11 || byte_count == 0x10 || byte_count == 0x0E || byte_count == 0x06)) {
+    
+    float max_chg = 0.0f;
+    float max_dis = 0.0f;
 
-    if (maxchgcurt_[bms_index]) maxchgcurt_[bms_index]->publish_state(max_chg);
-    if (maxdiscurt_[bms_index]) maxdiscurt_[bms_index]->publish_state(max_dis);
+    if (byte_count == 0x11) {
+      max_chg = ((buffer[10] << 8) | buffer[11]) * 0.1f;
+      max_dis = ((buffer[12] << 8) | buffer[13]) * 0.1f;
+    } else if (byte_count == 0x10) {
+      max_chg = ((buffer[9] << 8) | buffer[10]) * 0.1f;
+      max_dis = ((buffer[11] << 8) | buffer[12]) * 0.1f;
+    } else if (byte_count == 0x0E) {
+      max_chg = ((buffer[7] << 8) | buffer[8]) * 0.1f;
+      max_dis = ((buffer[9] << 8) | buffer[10]) * 0.1f;
+    } else if (byte_count == 0x06) {
+      max_chg = ((buffer[3] << 8) | buffer[4]) * 0.1f;
+      max_dis = ((buffer[5] << 8) | buffer[6]) * 0.1f;
+    }
+
+    if (maxchgcurt_[bms_index] && max_chg > 0.0f) maxchgcurt_[bms_index]->publish_state(max_chg);
+    if (maxdiscurt_[bms_index] && max_dis > 0.0f) maxdiscurt_[bms_index]->publish_state(max_dis);
   }
 
-  // 4. BLOCCO COILS / ALLARMI, MOSFET E BILANCIAMENTO (18 Byte / Function 0x01)
   if (function_code == 0x01 && byte_count == 0x12) {
     bool has_critical_alarm = false;
     for (int i = 3; i < 11; i++) {
@@ -283,15 +291,13 @@ void SeplosParser::process_packet() {
     if (system_status_[bms_index]) system_status_[bms_index]->publish_state(has_critical_alarm ? "Allarme / Protezione" : "Normale");
     if (active_alarm_[bms_index]) active_alarm_[bms_index]->publish_state(has_critical_alarm ? "Attivo (Vedi BMS)" : "Non Attivo");
 
-    // --- DIZIONARIO ESTREMO MOSFET (Solitamente mappati sul byte 15 o 16 del Coil) ---
     uint8_t mos_byte = buffer[15]; 
-    bool chg_mos_on = (mos_byte & 0x01);     // Bit 0: Stato MOS Carica
-    bool dischg_mos_on = (mos_byte & 0x02);  // Bit 1: Stato MOS Scarica
+    bool chg_mos_on = (mos_byte & 0x01);     
+    bool dischg_mos_on = (mos_byte & 0x02);  
 
     if (chg_mos_status_[bms_index]) chg_mos_status_[bms_index]->publish_state(chg_mos_on);
     if (dischg_mos_status_[bms_index]) dischg_mos_status_[bms_index]->publish_state(dischg_mos_on);
 
-    // --- FILTRAGGIO E SPECCHIO BIT BILANCIAMENTO CELLE (Byte 13 e 14) ---
     uint16_t balancing_bits = (buffer[13] << 8) | buffer[14];
     for (int c = 0; c < 16; c++) {
       bool is_balancing = (balancing_bits & (1 << c));
@@ -314,7 +320,7 @@ void SeplosParser::set_bms_count(int bms_count) {
 }
 
 void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval = update_interval * 1000;
+  this->update_interval_ = update_interval * 1000;
 }
 
 }  // namespace seplos_parser
