@@ -27,6 +27,9 @@ uint16_t chk_crc16(const uint8_t *data, uint16_t len) {
 void SeplosParser::setup() {
   ESP_LOGI(TAG, "Inizializzazione Sniffer Seplos Avanzato per %d BMS...", this->bms_count_);
 
+  // Sicurezza: Garantisce che il vettore dei tempi sia dimensionato correttamente all'avvio
+  last_updates_.resize(bms_count_, 0);
+
   pack_voltage_.resize(bms_count_, nullptr);
   current_.resize(bms_count_, nullptr);
   remaining_capacity_.resize(bms_count_, nullptr);
@@ -159,7 +162,6 @@ size_t SeplosParser::get_expected_length() {
     if (byte_count == 0x34) return 57; 
     if (byte_count == 0x11) return 22; 
     if (byte_count == 0x10) return 21; 
-    // Aggiunto supporto flessibile per altre varianti di byte_count dei limiti
     if (byte_count == 0x0E) return 19;
     if (byte_count == 0x06) return 11;
   }
@@ -179,7 +181,7 @@ bool SeplosParser::validate_crc() {
 }
 
 bool SeplosParser::should_update(int bms_index) {
-  if (bms_index < 0 || bms_index >= bms_count_) return false;
+  if (bms_index < 0 || bms_index >= bms_count_ || last_updates_.size() <= (size_t)bms_index) return false;
   uint32_t now = millis();
   if (now - last_updates_[bms_index] >= update_interval_ || last_updates_[bms_index] == 0) {
     last_updates_[bms_index] = now;
@@ -254,7 +256,6 @@ void SeplosParser::process_packet() {
     if (power_temp_[bms_index]) power_temp_[bms_index]->publish_state(max_t_v);
   }
 
-  // MIGLIORIA: Riconoscimento ed estrazione ottimizzata per limiti di corrente dinamici
   if ((function_code == 0x03 || function_code == 0x04) && 
       (byte_count == 0x11 || byte_count == 0x10 || byte_count == 0x0E || byte_count == 0x06)) {
     
