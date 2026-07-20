@@ -21,18 +21,21 @@ class SeplosParser : public Component, public uart::UARTDevice {
   void set_bms_count(int bms_count);
   void set_update_interval(int update_interval);
 
-  // Chiamati direttamente dal codegen Python (sensor.py / binary_sensor.py /
-  // text_sensor.py) al momento della compilazione: assegnano il sensore
-  // creato al posto giusto (bms_index + tipo), senza passare per il nome.
-  void set_sensor(int bms_index, const std::string &type, sensor::Sensor *s);
-  void set_binary_sensor(int bms_index, const std::string &type, binary_sensor::BinarySensor *s);
-  void set_text_sensor(int bms_index, const std::string &type, text_sensor::TextSensor *s);
+  // Registrazione dei sensori da ESPHome (chiamata dal codegen Python)
+  void register_sensor(sensor::Sensor *s) { sensors_.push_back(s); }
+  void register_text_sensor(text_sensor::TextSensor *ts) { text_sensors_.push_back(ts); }
+  void register_binary_sensor(binary_sensor::BinarySensor *bs) { binary_sensors_.push_back(bs); }
 
  protected:
   int bms_count_{1};
   uint32_t update_interval_{10000};  // Default 10 secondi in millisecondi
   std::deque<uint8_t> buffer;
   std::vector<uint32_t> last_updates_;
+
+  // Liste grezze raccolte dal codegen ESPHome, usate solo in setup() per il matching per nome
+  std::vector<sensor::Sensor *> sensors_;
+  std::vector<text_sensor::TextSensor *> text_sensors_;
+  std::vector<binary_sensor::BinarySensor *> binary_sensors_;
 
   // Sensori Analogici Mappati per BMS (vettori indicizzati per bms_index)
   std::vector<sensor::Sensor *> pack_voltage_;
@@ -55,7 +58,7 @@ class SeplosParser : public Component, public uart::UARTDevice {
   std::vector<sensor::Sensor *> case_temp_;
   std::vector<sensor::Sensor *> power_temp_;
 
-  // Matrici per Celle e Temperature [indice_elemento][indice_bms]
+  // Matrici per Celle e Temperature [Numero_Elemento][Indice_BMS]
   std::vector<std::vector<sensor::Sensor *>> cells_;
   std::vector<std::vector<sensor::Sensor *>> temps_;
 
@@ -67,7 +70,7 @@ class SeplosParser : public Component, public uart::UARTDevice {
   std::vector<binary_sensor::BinarySensor *> chg_mos_status_;
   std::vector<binary_sensor::BinarySensor *> dischg_mos_status_;
 
-  // Matrice Sensori Binari Bilanciamento [indice_cella][indice_bms]
+  // Matrice Sensori Binari Bilanciamento [Cella_0_fino_15][Indice_BMS]
   std::vector<std::vector<binary_sensor::BinarySensor *>> balancing_status_;
 
   // Funzioni interne di parsing e instradamento dei pacchetti
@@ -75,6 +78,7 @@ class SeplosParser : public Component, public uart::UARTDevice {
   bool validate_crc();
   void process_packet();
   bool should_update(int bms_index);
+  void map_sensor_vector(std::vector<sensor::Sensor *> &vec, const std::string &name);
 };
 
 }  // namespace seplos_parser
