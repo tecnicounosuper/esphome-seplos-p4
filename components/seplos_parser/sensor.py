@@ -4,10 +4,6 @@ from esphome.components import sensor
 from esphome.const import (
     CONF_ID,
     CONF_TYPE,
-    CONF_VOLTAGE,
-    CONF_CURRENT,
-    CONF_BATTERY_LEVEL,
-    CONF_CAPACITY,
     DEVICE_CLASS_VOLTAGE,
     DEVICE_CLASS_CURRENT,
     DEVICE_CLASS_BATTERY,
@@ -15,7 +11,6 @@ from esphome.const import (
     UNIT_VOLT,
     UNIT_AMPERE,
     UNIT_PERCENT,
-    UNIT_AMPERE_HOURS,
 )
 
 # Riferimento al namespace e all'Hub definiti in __init__.py
@@ -45,7 +40,7 @@ SENSOR_TYPES = {
         state_class=STATE_CLASS_MEASUREMENT,
     ),
     "capacity": sensor.sensor_schema(
-        unit_of_measurement=UNIT_AMPERE_HOURS,
+        unit_of_measurement="Ah",
         accuracy_decimals=2,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
