@@ -51,7 +51,7 @@ SENSOR_TYPES = {
 }
 
 CONFIG_SCHEMA = cv.All(
-    cv.TypedSchema(SENSOR_TYPES, lower=True)
+    cv.typed_schema(SENSOR_TYPES, lower=True)
     .extend(
         {
             cv.GenerateID(CONF_SEPLOS_PARSER_ID): cv.use_id(SeplosParser),
