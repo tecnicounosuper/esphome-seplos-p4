@@ -25,20 +25,30 @@ uint16_t chk_crc16(const uint8_t *data, uint16_t len) {
 void SeplosParser::setup() {
   ESP_LOGI(TAG, "Inizializzazione Sniffer Seplos per %d BMS...", this->bms_count_);
   last_updates_.resize(bms_count_, 0);
-}
 
-void SeplosParser::register_sensor(int bms_index, const std::string &type, sensor::Sensor *s) {
-  if (bms_index < 0 || bms_index >= 16) return;
+  pack_voltage_.resize(bms_count_, nullptr);
+  current_.resize(bms_count_, nullptr);
+  soc_.resize(bms_count_, nullptr);
+  remaining_capacity_.resize(bms_count_, nullptr);
 
-  if (pack_voltage_.size() <= (size_t)bms_index) pack_voltage_.resize(bms_index + 1, nullptr);
-  if (current_.size() <= (size_t)bms_index) current_.resize(bms_index + 1, nullptr);
-  if (soc_.size() <= (size_t)bms_index) soc_.resize(bms_index + 1, nullptr);
-  if (remaining_capacity_.size() <= (size_t)bms_index) remaining_capacity_.resize(bms_index + 1, nullptr);
-
-  if (type == "voltage") pack_voltage_[bms_index] = s;
-  else if (type == "current") current_[bms_index] = s;
-  else if (type == "soc") soc_[bms_index] = s;
-  else if (type == "capacity") remaining_capacity_[bms_index] = s;
+  // Mappatura automatica analizzando il nome del sensore in minuscolo
+  for (auto *s : this->sensors_) {
+    std::string name = str_tolower(s->get_name());
+    for (int i = 0; i < bms_count_; i++) {
+      std::string prefix = "bms" + std::to_string(i);
+      if (name.find(prefix) != std::string::npos) {
+        if (name.find("pack_voltage") != std::string::npos || name.find("voltage") != std::string::npos) {
+          pack_voltage_[i] = s;
+        } else if (name.find("current") != std::string::npos) {
+          current_[i] = s;
+        } else if (name.find("soc") != std::string::npos) {
+          soc_[i] = s;
+        } else if (name.find("remaining_capacity") != std::string::npos || name.find("capacity") != std::string::npos) {
+          remaining_capacity_[i] = s;
+        }
+      }
+    }
+  }
 }
 
 void SeplosParser::loop() {
