@@ -1,6 +1,8 @@
 #include "seplos_parser.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include <algorithm>
+#include <cctype>
 
 namespace esphome {
 namespace seplos_parser {
@@ -33,7 +35,9 @@ void SeplosParser::setup() {
 
   // Mappatura automatica analizzando il nome del sensore in minuscolo
   for (auto *s : this->sensors_) {
-    std::string name = str_tolower(s->get_name());
+    std::string name = s->get_name();
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+
     for (int i = 0; i < bms_count_; i++) {
       std::string prefix = "bms" + std::to_string(i);
       if (name.find(prefix) != std::string::npos) {
