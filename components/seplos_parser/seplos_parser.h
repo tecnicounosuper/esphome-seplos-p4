@@ -3,8 +3,6 @@
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/sensor/sensor.h"
-#include "esphome/components/text_sensor/text_sensor.h"
-#include "esphome/components/binary_sensor/binary_sensor.h"
 #include <vector>
 #include <deque>
 #include <string>
@@ -21,16 +19,17 @@ class SeplosParser : public Component, public uart::UARTDevice {
   void set_bms_count(int bms_count);
   void set_update_interval(int update_interval);
 
-  // Registrazione diretta da Python con bms_index e type
-  void register_sensor(int bms_index, const std::string &type, sensor::Sensor *s);
+  // Registrazione sensore ad 1 argomento, compatibile con sensor.py
+  void register_sensor(sensor::Sensor *s) { sensors_.push_back(s); }
 
  protected:
   int bms_count_{1};
   uint32_t update_interval_{10000};  
   std::deque<uint8_t> buffer;
   std::vector<uint32_t> last_updates_;
+  std::vector<sensor::Sensor *> sensors_;
 
-  // Sensori Mappati per BMS
+  // Sensori Mappati internamente per ciascun BMS
   std::vector<sensor::Sensor *> pack_voltage_;
   std::vector<sensor::Sensor *> current_;
   std::vector<sensor::Sensor *> soc_;
