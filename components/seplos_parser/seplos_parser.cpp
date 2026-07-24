@@ -76,7 +76,7 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
     // SOC in 0.1% (es. 0x03E8 = 1000 -> 100.0%)
     
     // Per dimostrazione, la decodifica applica i parser hex a blocchi:
-    try {
+    if (ascii_str.length() >= 38) {
       // Estrai tensione pacco (4 caratteri hex)
       std::string v_hex = ascii_str.substr(18, 4);
       uint16_t raw_v = (uint16_t) strtol(v_hex.c_str(), nullptr, 16);
@@ -104,8 +104,6 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
       if (soc <= 100.0f) {
         publish_val_(bms_idx, TYPE_SOC, soc);
       }
-    } catch (...) {
-      ESP_LOGW(TAG, "Errore parsing frame ASCII Seplos V3");
     }
   }
 }
