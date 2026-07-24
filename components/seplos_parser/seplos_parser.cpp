@@ -1,166 +1,154 @@
 #include "seplos_parser.h"
 #include "esphome/core/log.h"
-#include "esphome/core/helpers.h"
-#include <algorithm>
-#include <cctype>
+#include <cstdio>
+#include <cstring>
 
 namespace esphome {
 namespace seplos_parser {
 
-static const char *TAG = "seplos_parser.component";
+static const char *const TAG = "seplos_parser";
 
-uint16_t chk_crc16(const uint8_t *data, uint16_t len) {
-  uint16_t crc = 0xFFFF;
-  for (uint16_t i = 0; i < len; i++) {
-    crc ^= data[i];
-    for (uint8_t j = 0; j < 8; j++) {
-      if (crc & 0x0001) {
-        crc = (crc >> 1) ^ 0xA001;
-      } else {
-        crc >>= 1;
-      }
+void SeplosParserHub::setup() {
+  ESP_LOGI(TAG, "Inizializzazione Seplos V3 Sniffer su UART ESP32-P4...");
+  rx_buffer_.reserve(512);
+}
+
+void SeplosParserHub::loop() {
+  while (available()) {
+    uint8_t c;
+    read_byte(&c);
+    rx_buffer_.push_back(c);
+    last_rx_time_ = millis();
+
+    // Rilevamento fine frame ASCII (CR '\r' = 0x0D) o limite buffer
+    if (c == 0x0D || rx_buffer_.size() >= 256) {
+      parse_rx_buffer_();
+      rx_buffer_.clear();
     }
   }
-  return crc;
+
+  // Timeout frame (inattivo per più di 50ms)
+  if (!rx_buffer_.empty() && (millis() - last_rx_time_ > 50)) {
+    parse_rx_buffer_();
+    rx_buffer_.clear();
+  }
 }
 
-void SeplosParser::setup() {
-  ESP_LOGI(TAG, "Inizializzazione Sniffer Seplos per %d BMS...", this->bms_count_);
-  last_updates_.resize(bms_count_, 0);
+void SeplosParserHub::update() {
+  // Lo sniffer è passivo e ascolta la UART a 19200 baud.
+  // Invia uno heartbeat nei log.
+  ESP_LOGD(TAG, "Heartbeat Sniffer: in ascolto sulla linea RS485...");
+}
 
-  pack_voltage_.resize(bms_count_, nullptr);
-  current_.resize(bms_count_, nullptr);
-  soc_.resize(bms_count_, nullptr);
-  remaining_capacity_.resize(bms_count_, nullptr);
+void SeplosParserHub::parse_rx_buffer_() {
+  if (rx_buffer_.size() < 10) return;
 
-  // Mappatura automatica analizzando il nome del sensore in minuscolo
-  for (auto *s : this->sensors_) {
-    std::string name = s->get_name();
-    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+  // Controllo protocollo ASCII Seplos V3 (inizia con 0x20 "~" o 0x20 ' ')
+  if (rx_buffer_[0] == 0x20 || rx_buffer_[0] == 0x7E) {
+    parse_seplos_ascii_frame_(rx_buffer_);
+  } else if (rx_buffer_.size() >= 7) {
+    // Prova Modbus RTU (Address 0..15, Function 0x03)
+    parse_seplos_modbus_frame_(rx_buffer_.data(), rx_buffer_.size());
+  }
+}
 
-    for (int i = 0; i < bms_count_; i++) {
-      std::string prefix = "bms" + std::to_string(i);
-      if (name.find(prefix) != std::string::npos) {
-        if (name.find("pack_voltage") != std::string::npos || name.find("voltage") != std::string::npos) {
-          pack_voltage_[i] = s;
-        } else if (name.find("current") != std::string::npos) {
-          current_[i] = s;
-        } else if (name.find("soc") != std::string::npos) {
-          soc_[i] = s;
-        } else if (name.find("remaining_capacity") != std::string::npos || name.find("capacity") != std::string::npos) {
-          remaining_capacity_[i] = s;
-        }
+void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &frame) {
+  // Converti in stringa per facilitare il parsing ASCII
+  std::string ascii_str(frame.begin(), frame.end());
+  
+  // Esempio frame Seplos V3 ASCII: "~20004642..." o " 20004642..."
+  // Offset 1..2: SOI/VER, Offset 3..4: ADR (BMS address in Hex, e.g. "00", "01")
+  if (ascii_str.length() < 20) return;
+
+  char adr_buf[3] = {ascii_str[3], ascii_str[4], '\0'};
+  uint8_t bms_idx = (uint8_t) strtol(adr_buf, nullptr, 16);
+
+  ESP_LOGV(TAG, "Frame ASCII intercettato per BMS Index %d", bms_idx);
+
+  // Seplos V3 ASCII payload parsing (Valori standard in risposta 0x42 telemetry)
+  // Esempio posizioni per Telemetry Data standard Seplos V3:
+  // Pack Voltage, Current, Remaining Cap, Total Cap, SOC
+  // Estrazione di sicurezza dimostrativa standard:
+  if (ascii_str.length() >= 60) {
+    // In un frame di risposta standard Seplos V3 Telemetry:
+    // Voltage in mV (es. 0xCF20 = 53024 mV -> 53.02 V)
+    // Current in 10mA (es. signed short)
+    // SOC in 0.1% (es. 0x03E8 = 1000 -> 100.0%)
+    
+    // Per dimostrazione, la decodifica applica i parser hex a blocchi:
+    try {
+      // Estrai tensione pacco (4 caratteri hex)
+      std::string v_hex = ascii_str.substr(18, 4);
+      uint16_t raw_v = (uint16_t) strtol(v_hex.c_str(), nullptr, 16);
+      float voltage = raw_v * 0.01f; // 0.01V unità
+      if (voltage > 30.0f && voltage < 70.0f) {
+        publish_val_(bms_idx, TYPE_PACK_VOLTAGE, voltage);
       }
+
+      // Estrai corrente (4 caratteri hex signed)
+      std::string i_hex = ascii_str.substr(22, 4);
+      int16_t raw_i = (int16_t) strtol(i_hex.c_str(), nullptr, 16);
+      float current = raw_i * 0.01f;
+      publish_val_(bms_idx, TYPE_CURRENT, current);
+
+      // Estrai capacità residua (4 caratteri hex)
+      std::string cap_hex = ascii_str.substr(26, 4);
+      uint16_t raw_cap = (uint16_t) strtol(cap_hex.c_str(), nullptr, 16);
+      float remaining_cap = raw_cap * 0.01f;
+      publish_val_(bms_idx, TYPE_REMAINING_CAPACITY, remaining_cap);
+
+      // Estrai SOC (4 caratteri hex)
+      std::string soc_hex = ascii_str.substr(34, 4);
+      uint16_t raw_soc = (uint16_t) strtol(soc_hex.c_str(), nullptr, 16);
+      float soc = raw_soc * 0.1f;
+      if (soc <= 100.0f) {
+        publish_val_(bms_idx, TYPE_SOC, soc);
+      }
+    } catch (...) {
+      ESP_LOGW(TAG, "Errore parsing frame ASCII Seplos V3");
     }
   }
 }
 
-void SeplosParser::loop() {
-  while (this->available() > 0) {
-    uint8_t byte;
-    this->read_byte(&byte);
-    buffer.push_back(byte);
+void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len) {
+  uint8_t bms_idx = data[0];
+  uint8_t func = data[1];
 
-    if (buffer.size() >= 3) {
-      if (buffer[0] >= (uint8_t) bms_count_) {
-        buffer.pop_front();
-        continue;
-      }
+  if (bms_idx > 15 || func != 0x03 || len < 15) return;
 
-      size_t expected_len = get_expected_length();
-      if (expected_len == 0) {
-        buffer.pop_front();
-        continue;
-      }
+  uint8_t byte_count = data[2];
+  if (byte_count + 5 > len) return;
 
-      if (buffer.size() >= expected_len) {
-        if (validate_crc()) {
-          process_packet();
-          buffer.erase(buffer.begin(), buffer.begin() + expected_len);
-        } else {
-          buffer.pop_front();
-        }
-      }
+  // Lettura registri Modbus Seplos V3
+  // Reg 0: Voltage (0.1V o 0.01V)
+  uint16_t raw_v = (data[3] << 8) | data[4];
+  int16_t raw_i = (data[5] << 8) | data[6];
+  uint16_t raw_soc = (data[7] << 8) | data[8];
+  uint16_t raw_cap = (data[9] << 8) | data[10];
+
+  float voltage = raw_v * 0.01f;
+  float current = raw_i * 0.1f;
+  float soc = raw_soc * 0.1f;
+  float cap = raw_cap * 0.01f;
+
+  if (voltage > 30.0f && voltage < 70.0f) publish_val_(bms_idx, TYPE_PACK_VOLTAGE, voltage);
+  publish_val_(bms_idx, TYPE_CURRENT, current);
+  if (soc <= 100.0f) publish_val_(bms_idx, TYPE_SOC, soc);
+  publish_val_(bms_idx, TYPE_REMAINING_CAPACITY, cap);
+}
+
+void SeplosParserHub::publish_val_(uint8_t bms_idx, SeplosSensorType type, float value) {
+  for (auto *s : sensors_) {
+    if (s->get_bms_index() == bms_idx && s->get_sensor_type() == type) {
+      s->publish_state(value);
     }
-
-    while (buffer.size() > 256) {
-      buffer.pop_front();
-    }
   }
 }
 
-size_t SeplosParser::get_expected_length() {
-  uint8_t func = buffer[1];
-  uint8_t byte_count = buffer[2];
-
-  if (func == 0x04 || func == 0x03) {
-    if (byte_count == 0x24) return 41;
-    if (byte_count == 0x34) return 57;
-    if (byte_count == 0x11) return 22;
-    if (byte_count == 0x10) return 21;
-    if (byte_count == 0x0E) return 19;
-    if (byte_count == 0x06) return 11;
-  }
-  if (func == 0x01) {
-    if (byte_count == 0x12) return 23;
-  }
-  return 0;
-}
-
-bool SeplosParser::validate_crc() {
-  size_t len = get_expected_length();
-  if (len == 0 || buffer.size() < len) return false;
-  std::vector<uint8_t> local_data(buffer.begin(), buffer.begin() + len);
-  uint16_t computed_crc = chk_crc16(local_data.data(), len - 2);
-  uint16_t received_crc = (local_data[len - 1] << 8) | local_data[len - 2];
-  return computed_crc == received_crc;
-}
-
-bool SeplosParser::should_update(int bms_index) {
-  if (bms_index < 0 || bms_index >= bms_count_ || last_updates_.size() <= (size_t) bms_index) return false;
-  uint32_t now = millis();
-  if (now - last_updates_[bms_index] >= update_interval_ || last_updates_[bms_index] == 0) {
-    last_updates_[bms_index] = now;
-    return true;
-  }
-  return false;
-}
-
-void SeplosParser::process_packet() {
-  int bms_index = buffer[0];
-  if (bms_index < 0 || bms_index >= bms_count_) return;
-
-  uint8_t function_code = buffer[1];
-  uint8_t byte_count = buffer[2];
-
-  if ((function_code == 0x03 || function_code == 0x04) && byte_count == 0x24) {
-    if (!should_update(bms_index)) return;
-
-    float volt = ((buffer[3] << 8) | buffer[4]) * 0.01f;
-    float curr = ((int16_t) ((buffer[5] << 8) | buffer[6])) * 0.01f;
-    float rem_cap = ((buffer[7] << 8) | buffer[8]) * 0.01f;
-    float soc_val = ((buffer[13] << 8) | buffer[14]) * 0.1f;
-
-    if (bms_index < (int)pack_voltage_.size() && pack_voltage_[bms_index]) pack_voltage_[bms_index]->publish_state(volt);
-    if (bms_index < (int)current_.size() && current_[bms_index]) current_[bms_index]->publish_state(curr);
-    if (bms_index < (int)remaining_capacity_.size() && remaining_capacity_[bms_index]) remaining_capacity_[bms_index]->publish_state(rem_cap);
-    if (bms_index < (int)soc_.size() && soc_[bms_index]) soc_[bms_index]->publish_state(soc_val);
-  }
-}
-
-void SeplosParser::dump_config() {
-  ESP_LOGCONFIG(TAG, "Sniffer Seplos Parser:");
-  ESP_LOGCONFIG(TAG, "  BMS Count: %d", this->bms_count_);
-  ESP_LOGCONFIG(TAG, "  Update Interval: %lu ms", (unsigned long) this->update_interval_);
-}
-
-void SeplosParser::set_bms_count(int bms_count) {
-  this->bms_count_ = bms_count;
-  last_updates_.resize(bms_count, 0);
-}
-
-void SeplosParser::set_update_interval(int update_interval) {
-  this->update_interval_ = update_interval * 1000;
+void SeplosParserHub::dump_config() {
+  ESP_LOGCONFIG(TAG, "Seplos Parser Hub (ESP32-P4 Sniffer):");
+  ESP_LOGCONFIG(TAG, "  BMS Count: %d", bms_count_);
+  ESP_LOGCONFIG(TAG, "  Sensori Registrati: %zu", sensors_.size());
 }
 
 }  // namespace seplos_parser
