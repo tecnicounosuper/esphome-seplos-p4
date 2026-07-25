@@ -38,6 +38,7 @@ void SeplosParserHub::loop() {
 void SeplosParserHub::update() {
   ESP_LOGD(TAG, "Heartbeat Sniffer: in ascolto sulla linea RS485...");
 }
+
 void SeplosParserHub::parse_rx_buffer_() {
   if (rx_buffer_.empty()) return;
 
@@ -56,12 +57,12 @@ void SeplosParserHub::parse_rx_buffer_() {
     }
   }
 
-  // 2. PARSING FRAME ASCII (se presenti sequenze ASCII con header Seplos ~ / 0x20)
+  // 2. PARSING FRAME ASCII SEPLOS V3 (~20ADR...)
   if (ascii_found && ascii_chars.size() >= 15) {
     parse_seplos_ascii_frame_(ascii_chars);
   }
 
-  // 3. PARSING STREAM BINARIO / TELEMETRIA MODBUS SENZA FILTRI VINCOLANTI SU ADDRESS MODBUS
+  // 3. PARSING STREAM TELEMETRIA MODBUS / BINARIA
   parse_seplos_modbus_frame_(rx_buffer_.data(), rx_buffer_.size());
 }
 
@@ -70,6 +71,6 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
   
   if (ascii_str.length() < 15) return;
 
-  uint8_t bms_idx = 0;
+  uint8_t raw_adr = 0;
   if (ascii_str.length() >= 5) {
     char adr_buf[3] = {ascii_str[3], ascii_str[4], '
