@@ -39,26 +39,37 @@ void SeplosParserHub::update() {
   ESP_LOGD(TAG, "Heartbeat Sniffer: in ascolto sulla linea RS485...");
 }
 void SeplosParserHub::parse_rx_buffer_() {
-  if (rx_buffer_.size() < 7) return;
+  if (rx_buffer_.empty()) return;
 
-  // Scansione buffer alla ricerca di frame Modbus RTU (FC 0x03 o 0x04) o ASCII
-  for (size_t i = 0; i < rx_buffer_.size() - 6; i++) {
-    uint8_t addr = rx_buffer_[i];
-    uint8_t func = rx_buffer_[i + 1];
+  // 1. SEPARAZIONE CARATTERI ASCII DA BYTE BINARI
+  std::vector<uint8_t> ascii_chars;
+  std::vector<uint8_t> binary_bytes;
 
-    if ((func == 0x03 || func == 0x04) && addr <= 16) {
-      parse_seplos_modbus_frame_(&rx_buffer_[i], rx_buffer_.size() - i);
-      break;
-    } else if (addr == 0x20 || addr == 0x7E) {
-      parse_seplos_ascii_frame_(rx_buffer_);
-      break;
+  bool ascii_found = false;
+  for (uint8_t b : rx_buffer_) {
+    // Caratteri ASCII validi (Header '~'=0x7E, Spazio 0x20, cifre 0-9, A-F, a-f, CR 0x0D, LF 0x0A)
+    if (b == 0x7E || b == 0x20 || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f') || b == 0x0D || b == 0x0A) {
+      ascii_chars.push_back(b);
+      if (b == 0x7E || b == 0x20) ascii_found = true;
+    } else {
+      binary_bytes.push_back(b);
     }
   }
+
+  // 2. PARSING FRAME ASCII (se presenti sequenze ASCII con header Seplos ~ / 0x20)
+  if (ascii_found && ascii_chars.size() >= 15) {
+    parse_seplos_ascii_frame_(ascii_chars);
+  }
+
+  // 3. PARSING STREAM BINARIO / TELEMETRIA MODBUS SENZA FILTRI VINCOLANTI SU ADDRESS MODBUS
+  parse_seplos_modbus_frame_(rx_buffer_.data(), rx_buffer_.size());
 }
 
 void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &frame) {
   std::string ascii_str(frame.begin(), frame.end());
   
-  if (ascii_str.length() < 20) return;
+  if (ascii_str.length() < 15) return;
 
-  char adr_buf[3] = {ascii_str[3], ascii_str[4], '
+  uint8_t bms_idx = 0;
+  if (ascii_str.length() >= 5) {
+    char adr_buf[3] = {ascii_str[3], ascii_str[4], '
