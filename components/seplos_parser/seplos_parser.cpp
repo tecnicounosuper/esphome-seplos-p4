@@ -37,7 +37,13 @@ void SeplosParserHub::loop() {
 }
 
 void SeplosParserHub::update() {
-  ESP_LOGD(TAG, "Heartbeat Sniffer: ascolto passivo sulla linea RS485 Seplos V3...");
+  uint32_t now = millis();
+  if (active_polling_ || (now - last_rx_time_ > 8000)) {
+    ESP_LOGI(TAG, "Assenza traffico passivo RS485 o Polling Attivo: invio query Seplos V3 ASCII (CID2=0x42)...");
+    this->write_str("~20004642E002000D000D010D020000FDA9\r");
+  } else {
+    ESP_LOGD(TAG, "Heartbeat Sniffer: ascolto passivo attivo sulla linea RS485 Seplos V3...");
+  }
 }
 
 void SeplosParserHub::parse_rx_buffer_() {
@@ -69,4 +75,193 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
 
   uint8_t raw_adr = 0;
   if (ascii_str.length() >= 5) {
-    char adr_buf[3] = {ascii_str[3], ascii_str[4], '
+    char adr_buf[3] = {ascii_str[3], ascii_str[4], 0};
+    raw_adr = (uint8_t) strtol(adr_buf, nullptr, 16);
+  }
+
+  uint8_t bms_idx = raw_adr;
+  if (bms_sensors_.find(bms_idx) == bms_sensors_.end() && raw_adr > 0 && bms_sensors_.find(raw_adr - 1) != bms_sensors_.end()) {
+    bms_idx = raw_adr - 1;
+  }
+
+  ESP_LOGV(TAG, "Frame ASCII Seplos V3 per ADR 0x%02X -> BMS Index %d", raw_adr, bms_idx);
+
+  // Decodifica Telemetria Generale (Tensione, Corrente, Cap, SOC)
+  if (ascii_str.length() >= 38) {
+    std::string v_hex = ascii_str.substr(18, 4);
+    uint16_t raw_v = (uint16_t) strtol(v_hex.c_str(), nullptr, 16);
+    float voltage = raw_v * 0.01f;
+
+    if (voltage > 30.0f && voltage < 70.0f) {
+      publish_val_(bms_idx, "pack_voltage", voltage);
+    }
+
+    if (ascii_str.length() >= 26) {
+      std::string i_hex = ascii_str.substr(22, 4);
+      int16_t raw_i = (int16_t) strtol(i_hex.c_str(), nullptr, 16);
+      float current = raw_i * 0.01f;
+      publish_val_(bms_idx, "current", current);
+    }
+
+    if (ascii_str.length() >= 30) {
+      std::string cap_hex = ascii_str.substr(26, 4);
+      uint16_t raw_cap = (uint16_t) strtol(cap_hex.c_str(), nullptr, 16);
+      float remaining_cap = raw_cap * 0.01f;
+      publish_val_(bms_idx, "remaining_capacity", remaining_cap);
+    }
+
+    if (ascii_str.length() >= 38) {
+      std::string soc_hex = ascii_str.substr(34, 4);
+      uint16_t raw_soc = (uint16_t) strtol(soc_hex.c_str(), nullptr, 16);
+      float soc = raw_soc * 0.1f;
+      if (soc <= 100.0f && soc >= 0.0f) {
+        publish_val_(bms_idx, "soc", soc);
+      }
+    }
+  }
+
+  // Decodifica Celle 16S e Temperature (se presenti nel frame CID2=0x42/0x44)
+  if (ascii_str.length() >= 110) {
+    float min_v = 99.0f;
+    float max_v = 0.0f;
+    bool cells_found = false;
+
+    // 16 celle in Hex (4 cifre ciascuna, ad es. 0D00 = 3328mV = 3.328V)
+    for (int c = 0; c < 16; c++) {
+      size_t pos = 38 + (c * 4);
+      if (pos + 4 <= ascii_str.length()) {
+        std::string cell_hex = ascii_str.substr(pos, 4);
+        uint16_t cell_mv = (uint16_t) strtol(cell_hex.c_str(), nullptr, 16);
+        float cell_v = cell_mv * 0.001f;
+
+        if (cell_v > 2.0f && cell_v < 4.5f) {
+          publish_cell_val_(bms_idx, c, cell_v);
+          if (cell_v < min_v) min_v = cell_v;
+          if (cell_v > max_v) max_v = cell_v;
+          cells_found = true;
+        }
+      }
+    }
+
+    if (cells_found && max_v >= min_v) {
+      publish_val_(bms_idx, "min_cell_voltage", min_v);
+      publish_val_(bms_idx, "max_cell_voltage", max_v);
+      publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f); // in mV
+    }
+  }
+}
+
+void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len) {
+  if (len < 10) return;
+
+  for (size_t i = 0; i < len - 8; i++) {
+    uint8_t raw_addr = data[i];
+    uint8_t func = data[i + 1];
+    uint8_t byte_count = data[i + 2];
+
+    if ((func == 0x03 || func == 0x04 || func == 0x10 || raw_addr <= 16) && (i + byte_count + 4 <= len)) {
+      const uint8_t *payload = &data[i + 3];
+
+      uint8_t bms_idx = raw_addr;
+      if (bms_sensors_.find(bms_idx) == bms_sensors_.end() && raw_addr > 0 && bms_sensors_.find(raw_addr - 1) != bms_sensors_.end()) {
+        bms_idx = raw_addr - 1;
+      }
+
+      if (byte_count == 0x34 && (i + 53 <= len)) {
+        // Blocco Seplos 26 registri (52 byte): 16 celle + temp + telemetria
+        float min_v = 99.0f;
+        float max_v = 0.0f;
+        bool cells_valid = false;
+
+        for (int c = 0; c < 16; c++) {
+          uint16_t cell_mv = (uint16_t)((payload[c * 2] << 8) | payload[c * 2 + 1]);
+          float cell_v = cell_mv * 0.001f;
+          if (cell_v > 2.0f && cell_v < 4.5f) {
+            publish_cell_val_(bms_idx, c, cell_v);
+            if (cell_v < min_v) min_v = cell_v;
+            if (cell_v > max_v) max_v = cell_v;
+            cells_valid = true;
+          }
+        }
+
+        if (cells_valid && max_v >= min_v) {
+          publish_val_(bms_idx, "min_cell_voltage", min_v);
+          publish_val_(bms_idx, "max_cell_voltage", max_v);
+          publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f);
+        }
+
+        // Temperature 4 sonde ( offset Kelvin/0.1C )
+        float t1 = ((int16_t)((payload[32] << 8) | payload[33]) - 2731) * 0.1f;
+        float t2 = ((int16_t)((payload[34] << 8) | payload[35]) - 2731) * 0.1f;
+        float t3 = ((int16_t)((payload[36] << 8) | payload[37]) - 2731) * 0.1f;
+        float t4 = ((int16_t)((payload[38] << 8) | payload[39]) - 2731) * 0.1f;
+        publish_val_(bms_idx, "temp_1", t1);
+        publish_val_(bms_idx, "temp_2", t2);
+        publish_val_(bms_idx, "temp_3", t3);
+        publish_val_(bms_idx, "temp_4", t4);
+
+        // Telemetria Generale
+        int16_t raw_i = (int16_t)((payload[40] << 8) | payload[41]);
+        uint16_t raw_v = (uint16_t)((payload[42] << 8) | payload[43]);
+        uint16_t raw_rem_cap = (uint16_t)((payload[44] << 8) | payload[45]);
+        uint16_t raw_soc = (uint16_t)((payload[48] << 8) | payload[49]);
+
+        float voltage = raw_v * 0.01f;
+        float current = raw_i * 0.01f;
+        float rem_cap = raw_rem_cap * 0.01f;
+        float soc = raw_soc * 0.1f;
+
+        if (voltage > 30.0f && voltage < 70.0f) publish_val_(bms_idx, "pack_voltage", voltage);
+        publish_val_(bms_idx, "current", current);
+        if (soc <= 100.0f && soc >= 0.0f) publish_val_(bms_idx, "soc", soc);
+        publish_val_(bms_idx, "remaining_capacity", rem_cap);
+
+        break;
+      }
+    }
+  }
+}
+
+void SeplosParserHub::publish_val_(uint8_t bms_idx, const std::string &type_str, float value) {
+  auto it = bms_sensors_.find(bms_idx);
+  if (it == bms_sensors_.end()) return;
+
+  sensor::Sensor *s = nullptr;
+  if (type_str == "pack_voltage") s = it->second.pack_voltage;
+  else if (type_str == "current") s = it->second.current;
+  else if (type_str == "soc") s = it->second.soc;
+  else if (type_str == "soh") s = it->second.soh;
+  else if (type_str == "remaining_capacity") s = it->second.remaining_capacity;
+  else if (type_str == "cycles") s = it->second.cycles;
+  else if (type_str == "min_cell_voltage") s = it->second.min_cell_voltage;
+  else if (type_str == "max_cell_voltage") s = it->second.max_cell_voltage;
+  else if (type_str == "cell_delta_voltage") s = it->second.cell_delta_voltage;
+  else if (type_str == "temp_1") s = it->second.temp1;
+  else if (type_str == "temp_2") s = it->second.temp2;
+  else if (type_str == "temp_3") s = it->second.temp3;
+  else if (type_str == "temp_4") s = it->second.temp4;
+  else if (type_str == "mos_temp") s = it->second.mos_temp;
+
+  if (s != nullptr) {
+    s->publish_state(value);
+  }
+}
+
+void SeplosParserHub::publish_cell_val_(uint8_t bms_idx, uint8_t cell_idx, float value) {
+  auto it = bms_sensors_.find(bms_idx);
+  if (it == bms_sensors_.end() || cell_idx >= 16) return;
+
+  sensor::Sensor *s = it->second.cells[cell_idx];
+  if (s != nullptr) {
+    s->publish_state(value);
+  }
+}
+
+void SeplosParserHub::dump_config() {
+  ESP_LOGCONFIG(TAG, "Seplos Parser Hub (ESP32-P4 + Seplos V3 Sniffer):");
+  ESP_LOGCONFIG(TAG, "  BMS Count: %d", bms_count_);
+  ESP_LOGCONFIG(TAG, "  BMS Mappati: %zu", bms_sensors_.size());
+}
+
+}  // namespace seplos_parser
+}  // namespace esphome
