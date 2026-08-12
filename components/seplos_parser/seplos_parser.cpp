@@ -39,8 +39,17 @@ void SeplosParserHub::loop() {
 void SeplosParserHub::update() {
   uint32_t now = millis();
   if (active_polling_ || (now - last_rx_time_ > 8000)) {
-    ESP_LOGI(TAG, "Assenza traffico passivo RS485 o Polling Attivo: invio query Seplos V3 ASCII (CID2=0x42)...");
-    this->write_str("~20004642E002000D000D010D020000FDA9\r");
+    static uint8_t poll_adr = 0;
+    uint8_t adr = poll_adr % bms_count_;
+    poll_adr++;
+
+    if (adr == 0) {
+      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 1 Master (ADR 0x00)...");
+      this->write_str("~20004642E002000D000D010D020000FDA9\r");
+    } else {
+      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 2 Slave (ADR 0x01)...");
+      this->write_str("~20014642E002000D000D010D020000FDA8\r");
+    }
   } else {
     ESP_LOGD(TAG, "Heartbeat Sniffer: ascolto passivo attivo sulla linea RS485 Seplos V3...");
   }
@@ -49,22 +58,25 @@ void SeplosParserHub::update() {
 void SeplosParserHub::parse_rx_buffer_() {
   if (rx_buffer_.empty()) return;
 
-  // 1. ISOLAMENTO FRAME ASCII
+  // 1. ISOLAMENTO FRAME ASCII (Se inizia con '~' o contiene frame ASCII)
   std::vector<uint8_t> ascii_chars;
   bool ascii_found = false;
   for (uint8_t b : rx_buffer_) {
-    if (b == 0x7E || b == 0x20 || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f') || b == 0x0D || b == 0x0A) {
-      ascii_chars.push_back(b);
-      if (b == 0x7E) ascii_found = true;
+    if (b == 0x7E) ascii_found = true;
+    if (ascii_found) {
+      if (b == 0x7E || b == 0x20 || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f') || b == 0x0D || b == 0x0A) {
+        ascii_chars.push_back(b);
+      }
     }
   }
 
   // 2. PARSING FRAME ASCII SEPLOS V3 (~20ADR...)
   if (ascii_found && ascii_chars.size() >= 15) {
     parse_seplos_ascii_frame_(ascii_chars);
+    return; // Se è un frame ASCII, NON eseguire il parser Modbus per evitare falsi positivi!
   }
 
-  // 3. PARSING STREAM MODBUS RTU
+  // 3. PARSING STREAM MODBUS RTU CON CRC16
   parse_seplos_modbus_frame_(rx_buffer_.data(), rx_buffer_.size());
 }
 
@@ -159,13 +171,11 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
     uint8_t func = data[i + 1];
     uint8_t byte_count = data[i + 2];
 
-    if ((func == 0x03 || func == 0x04 || func == 0x10 || raw_addr <= 16) && (i + byte_count + 4 <= len)) {
+    // Rigido controllo Modbus RTU (Funzione 0x03 o 0x04 e Indirizzo BMS <= 16)
+    if ((func == 0x03 || func == 0x04) && (raw_addr >= 1 && raw_addr <= 16) && (i + byte_count + 5 <= len)) {
       const uint8_t *payload = &data[i + 3];
 
-      uint8_t bms_idx = raw_addr;
-      if (bms_sensors_.find(bms_idx) == bms_sensors_.end() && raw_addr > 0 && bms_sensors_.find(raw_addr - 1) != bms_sensors_.end()) {
-        bms_idx = raw_addr - 1;
-      }
+      uint8_t bms_idx = raw_addr - 1; // Mappatura 1-based (Modbus ADR 1 -> BMS 0, ADR 2 -> BMS 1)
 
       if (byte_count == 0x34 && (i + 53 <= len)) {
         // Blocco Seplos 26 registri (52 byte): 16 celle + temp + telemetria
@@ -195,10 +205,10 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
         float t2 = ((int16_t)((payload[34] << 8) | payload[35]) - 2731) * 0.1f;
         float t3 = ((int16_t)((payload[36] << 8) | payload[37]) - 2731) * 0.1f;
         float t4 = ((int16_t)((payload[38] << 8) | payload[39]) - 2731) * 0.1f;
-        publish_val_(bms_idx, "temp_1", t1);
-        publish_val_(bms_idx, "temp_2", t2);
-        publish_val_(bms_idx, "temp_3", t3);
-        publish_val_(bms_idx, "temp_4", t4);
+        if (t1 > -30.0f && t1 < 100.0f) publish_val_(bms_idx, "temp_1", t1);
+        if (t2 > -30.0f && t2 < 100.0f) publish_val_(bms_idx, "temp_2", t2);
+        if (t3 > -30.0f && t3 < 100.0f) publish_val_(bms_idx, "temp_3", t3);
+        if (t4 > -30.0f && t4 < 100.0f) publish_val_(bms_idx, "temp_4", t4);
 
         // Telemetria Generale
         int16_t raw_i = (int16_t)((payload[40] << 8) | payload[41]);
@@ -212,9 +222,9 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
         float soc = raw_soc * 0.1f;
 
         if (voltage > 30.0f && voltage < 70.0f) publish_val_(bms_idx, "pack_voltage", voltage);
-        publish_val_(bms_idx, "current", current);
+        if (current > -500.0f && current < 500.0f) publish_val_(bms_idx, "current", current);
         if (soc <= 100.0f && soc >= 0.0f) publish_val_(bms_idx, "soc", soc);
-        publish_val_(bms_idx, "remaining_capacity", rem_cap);
+        if (rem_cap <= 2000.0f && rem_cap >= 0.0f) publish_val_(bms_idx, "remaining_capacity", rem_cap);
 
         break;
       }
