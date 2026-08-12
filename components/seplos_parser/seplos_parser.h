@@ -34,6 +34,7 @@ class SeplosParserHub : public PollingComponent, public uart::UARTDevice {
   SeplosParserHub() = default;
 
   void set_bms_count(uint8_t count) { bms_count_ = count; }
+  void set_active_polling(bool active) { active_polling_ = active; }
 
   void set_pack_voltage_sensor(uint8_t bms_idx, sensor::Sensor *s) { bms_sensors_[bms_idx].pack_voltage = s; }
   void set_current_sensor(uint8_t bms_idx, sensor::Sensor *s) { bms_sensors_[bms_idx].current = s; }
@@ -81,6 +82,7 @@ class SeplosParserHub : public PollingComponent, public uart::UARTDevice {
   void publish_cell_val_(uint8_t bms_idx, uint8_t cell_idx, float value);
 
   uint8_t bms_count_{2};
+  bool active_polling_{true};
   std::map<uint8_t, BmsSensors> bms_sensors_;
   std::vector<uint8_t> rx_buffer_;
   uint32_t last_rx_time_{0};
