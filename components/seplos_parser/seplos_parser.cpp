@@ -84,6 +84,7 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
   std::string ascii_str(frame.begin(), frame.end());
   
   if (ascii_str.length() < 15) return;
+  if (ascii_str[0] != '~') return;
 
   uint8_t raw_adr = 0;
   if (ascii_str.length() >= 5) {
@@ -96,71 +97,161 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
     bms_idx = raw_adr - 1;
   }
 
-  ESP_LOGV(TAG, "Frame ASCII Seplos V3 per ADR 0x%02X -> BMS Index %d", raw_adr, bms_idx);
+  ESP_LOGV(TAG, "Frame ASCII Seplos V3 per ADR 0x%02X -> BMS Index %d (Len %d)", raw_adr, bms_idx, (int)ascii_str.length());
 
-  // Decodifica Telemetria Generale (Tensione, Corrente, Cap, SOC)
-  if (ascii_str.length() >= 38) {
-    std::string v_hex = ascii_str.substr(18, 4);
+  // Inizio payload dati alla posizione 13 (dopo header ~20004600E002)
+  size_t pos = 13;
+  if (ascii_str.length() <= pos + 2) return;
+
+  // 1. Numero di Celle (2 caratteri Hex, es. "10" = 16 celle)
+  std::string num_cells_hex = ascii_str.substr(pos, 2);
+  pos += 2;
+  uint8_t num_cells = (uint8_t) strtol(num_cells_hex.c_str(), nullptr, 16);
+
+  if (num_cells > 32) return; // Controllo validità
+
+  float min_v = 99.0f;
+  float max_v = 0.0f;
+  bool cells_found = false;
+
+  // Lettura dinamica delle celle (4 caratteri Hex ciascuna in mV)
+  for (int c = 0; c < num_cells; c++) {
+    if (pos + 4 > ascii_str.length()) break;
+    std::string cell_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    uint16_t cell_mv = (uint16_t) strtol(cell_hex.c_str(), nullptr, 16);
+    float cell_v = cell_mv * 0.001f;
+
+    if (cell_v > 1.8f && cell_v < 4.5f) {
+      if (c < 16) {
+        publish_cell_val_(bms_idx, c, cell_v);
+      }
+      if (cell_v < min_v) min_v = cell_v;
+      if (cell_v > max_v) max_v = cell_v;
+      cells_found = true;
+    }
+  }
+
+  if (cells_found && max_v >= min_v) {
+    publish_val_(bms_idx, "min_cell_voltage", min_v);
+    publish_val_(bms_idx, "max_cell_voltage", max_v);
+    publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f); // in mV
+  }
+
+  // 2. Numero di Sonde di Temperatura (2 caratteri Hex, es. "04" = 4 sonde)
+  if (pos + 2 > ascii_str.length()) return;
+  std::string num_temps_hex = ascii_str.substr(pos, 2);
+  pos += 2;
+  uint8_t num_temps = (uint8_t) strtol(num_temps_hex.c_str(), nullptr, 16);
+
+  if (num_temps > 8) return;
+
+  for (int t = 0; t < num_temps; t++) {
+    if (pos + 4 > ascii_str.length()) break;
+    std::string temp_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    uint16_t temp_raw = (uint16_t) strtol(temp_hex.c_str(), nullptr, 16);
+    // Formula Seplos V3: (Kelvin*10 - 2731) * 0.1°C
+    float temp_c = (temp_raw - 2731) * 0.1f;
+    if (temp_c > -30.0f && temp_c < 100.0f) {
+      if (t == 0) publish_val_(bms_idx, "temp_1", temp_c);
+      else if (t == 1) publish_val_(bms_idx, "temp_2", temp_c);
+      else if (t == 2) publish_val_(bms_idx, "temp_3", temp_c);
+      else if (t == 3) publish_val_(bms_idx, "temp_4", temp_c);
+      else if (t == 4) publish_val_(bms_idx, "mos_temp", temp_c);
+    }
+  }
+
+  // 3. Corrente del Pacco (4 caratteri Hex, int16 signed in 0.01A)
+  if (pos + 4 <= ascii_str.length()) {
+    std::string i_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    int16_t raw_i = (int16_t) strtol(i_hex.c_str(), nullptr, 16);
+    float current = raw_i * 0.01f;
+    if (current > -500.0f && current < 500.0f) {
+      publish_val_(bms_idx, "current", current);
+    }
+  }
+
+  // 4. Tensione Totale del Pacco (4 caratteri Hex, uint16 in 0.01V)
+  if (pos + 4 <= ascii_str.length()) {
+    std::string v_hex = ascii_str.substr(pos, 4);
+    pos += 4;
     uint16_t raw_v = (uint16_t) strtol(v_hex.c_str(), nullptr, 16);
     float voltage = raw_v * 0.01f;
-
     if (voltage > 30.0f && voltage < 70.0f) {
       publish_val_(bms_idx, "pack_voltage", voltage);
     }
+  }
 
-    if (ascii_str.length() >= 26) {
-      std::string i_hex = ascii_str.substr(22, 4);
-      int16_t raw_i = (int16_t) strtol(i_hex.c_str(), nullptr, 16);
-      float current = raw_i * 0.01f;
-      publish_val_(bms_idx, "current", current);
-    }
-
-    if (ascii_str.length() >= 30) {
-      std::string cap_hex = ascii_str.substr(26, 4);
-      uint16_t raw_cap = (uint16_t) strtol(cap_hex.c_str(), nullptr, 16);
-      float remaining_cap = raw_cap * 0.01f;
+  // 5. Capacità Residua (4 caratteri Hex, uint16 in 0.01Ah)
+  if (pos + 4 <= ascii_str.length()) {
+    std::string cap_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    uint16_t raw_cap = (uint16_t) strtol(cap_hex.c_str(), nullptr, 16);
+    float remaining_cap = raw_cap * 0.01f;
+    if (remaining_cap >= 0.0f && remaining_cap <= 2000.0f) {
       publish_val_(bms_idx, "remaining_capacity", remaining_cap);
     }
+  }
 
-    if (ascii_str.length() >= 38) {
-      std::string soc_hex = ascii_str.substr(34, 4);
-      uint16_t raw_soc = (uint16_t) strtol(soc_hex.c_str(), nullptr, 16);
-      float soc = raw_soc * 0.1f;
-      if (soc <= 100.0f && soc >= 0.0f) {
-        publish_val_(bms_idx, "soc", soc);
-      }
+  // 6. Custom / Battery Number (2 caratteri Hex)
+  if (pos + 2 <= ascii_str.length()) {
+    pos += 2;
+  }
+
+  // 7. Capacità Nominale / Totale (4 caratteri Hex, in 0.01Ah)
+  if (pos + 4 <= ascii_str.length()) {
+    pos += 4;
+  }
+
+  // 8. Stato di Carica (SOC) (4 caratteri Hex, uint16 in 0.1%)
+  if (pos + 4 <= ascii_str.length()) {
+    std::string soc_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    uint16_t raw_soc = (uint16_t) strtol(soc_hex.c_str(), nullptr, 16);
+    float soc = raw_soc * 0.1f;
+    if (soc <= 100.0f && soc >= 0.0f) {
+      publish_val_(bms_idx, "soc", soc);
     }
   }
 
-  // Decodifica Celle 16S e Temperature (se presenti nel frame CID2=0x42/0x44)
-  if (ascii_str.length() >= 110) {
-    float min_v = 99.0f;
-    float max_v = 0.0f;
-    bool cells_found = false;
-
-    // 16 celle in Hex (4 cifre ciascuna, ad es. 0D00 = 3328mV = 3.328V)
-    for (int c = 0; c < 16; c++) {
-      size_t pos = 38 + (c * 4);
-      if (pos + 4 <= ascii_str.length()) {
-        std::string cell_hex = ascii_str.substr(pos, 4);
-        uint16_t cell_mv = (uint16_t) strtol(cell_hex.c_str(), nullptr, 16);
-        float cell_v = cell_mv * 0.001f;
-
-        if (cell_v > 2.0f && cell_v < 4.5f) {
-          publish_cell_val_(bms_idx, c, cell_v);
-          if (cell_v < min_v) min_v = cell_v;
-          if (cell_v > max_v) max_v = cell_v;
-          cells_found = true;
-        }
-      }
-    }
-
-    if (cells_found && max_v >= min_v) {
-      publish_val_(bms_idx, "min_cell_voltage", min_v);
-      publish_val_(bms_idx, "max_cell_voltage", max_v);
-      publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f); // in mV
+  // 9. Stato di Salute (SOH) (4 caratteri Hex, uint16 in 0.1%)
+  if (pos + 4 <= ascii_str.length()) {
+    std::string soh_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    uint16_t raw_soh = (uint16_t) strtol(soh_hex.c_str(), nullptr, 16);
+    float soh = raw_soh * 0.1f;
+    if (soh <= 100.0f && soh >= 0.0f) {
+      publish_val_(bms_idx, "soh", soh);
     }
   }
+
+  // 10. Numero di Cicli (4 caratteri Hex, uint16)
+  if (pos + 4 <= ascii_str.length()) {
+    std::string cycles_hex = ascii_str.substr(pos, 4);
+    pos += 4;
+    uint16_t cycles = (uint16_t) strtol(cycles_hex.c_str(), nullptr, 16);
+    if (cycles < 65000) {
+      publish_val_(bms_idx, "cycles", (float)cycles);
+    }
+  }
+}
+
+static uint16_t calculate_modbus_crc16(const uint8_t *data, uint16_t len) {
+  uint16_t crc = 0xFFFF;
+  for (uint16_t pos = 0; pos < len; pos++) {
+    crc ^= (uint16_t)data[pos];
+    for (int i = 8; i != 0; i--) {
+      if ((crc & 0x0001) != 0) {
+        crc >>= 1;
+        crc ^= 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
 }
 
 void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len) {
@@ -173,8 +264,15 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
 
     // Rigido controllo Modbus RTU (Funzione 0x03 o 0x04 e Indirizzo BMS <= 16)
     if ((func == 0x03 || func == 0x04) && (raw_addr >= 1 && raw_addr <= 16) && (i + byte_count + 5 <= len)) {
-      const uint8_t *payload = &data[i + 3];
+      uint16_t msg_len = byte_count + 5;
+      uint16_t calculated_crc = calculate_modbus_crc16(&data[i], msg_len - 2);
+      uint16_t frame_crc = data[i + msg_len - 2] | (data[i + msg_len - 1] << 8);
 
+      if (calculated_crc != frame_crc) {
+        continue; // Ignora se il CRC Modbus non corrisponde
+      }
+
+      const uint8_t *payload = &data[i + 3];
       uint8_t bms_idx = raw_addr - 1; // Mappatura 1-based (Modbus ADR 1 -> BMS 0, ADR 2 -> BMS 1)
 
       if (byte_count == 0x34 && (i + 53 <= len)) {
