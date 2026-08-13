@@ -83,8 +83,18 @@ void SeplosParserHub::parse_rx_buffer_() {
 void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &frame) {
   std::string ascii_str(frame.begin(), frame.end());
   
-  if (ascii_str.length() < 15) return;
+  if (ascii_str.length() < 17) return;
   if (ascii_str[0] != '~') return;
+
+  // Verifica CID1 (46 = Telemetria) e RTN (00 = Risposta OK dal BMS)
+  if (ascii_str.length() < 9) return;
+  std::string cid1_str = ascii_str.substr(5, 2);
+  std::string rtn_str = ascii_str.substr(7, 2);
+
+  // Soltanto se è una risposta OK (RTN = 00) e CID1 = 46!
+  if (cid1_str != "46" || rtn_str != "00") {
+    return; // Ignora query, echi di trasmissione TX o codici di errore!
+  }
 
   uint8_t raw_adr = 0;
   if (ascii_str.length() >= 5) {
@@ -97,8 +107,6 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
     bms_idx = raw_adr - 1;
   }
 
-  ESP_LOGV(TAG, "Frame ASCII Seplos V3 per ADR 0x%02X -> BMS Index %d (Len %d)", raw_adr, bms_idx, (int)ascii_str.length());
-
   // Inizio payload dati alla posizione 13 (dopo header ~20004600E002)
   size_t pos = 13;
   if (ascii_str.length() <= pos + 2) return;
@@ -108,7 +116,7 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
   pos += 2;
   uint8_t num_cells = (uint8_t) strtol(num_cells_hex.c_str(), nullptr, 16);
 
-  if (num_cells > 32) return; // Controllo validità
+  if (num_cells < 4 || num_cells > 24) return; // Controllo di sicurezza: tra 4 e 24 celle!
 
   float min_v = 99.0f;
   float max_v = 0.0f;
@@ -116,7 +124,7 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
 
   // Lettura dinamica delle celle (4 caratteri Hex ciascuna in mV)
   for (int c = 0; c < num_cells; c++) {
-    if (pos + 4 > ascii_str.length()) break;
+    if (pos + 4 > ascii_str.length()) return;
     std::string cell_hex = ascii_str.substr(pos, 4);
     pos += 4;
     uint16_t cell_mv = (uint16_t) strtol(cell_hex.c_str(), nullptr, 16);
@@ -144,10 +152,10 @@ void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &fram
   pos += 2;
   uint8_t num_temps = (uint8_t) strtol(num_temps_hex.c_str(), nullptr, 16);
 
-  if (num_temps > 8) return;
+  if (num_temps < 1 || num_temps > 8) return; // Controllo validità sonde!
 
   for (int t = 0; t < num_temps; t++) {
-    if (pos + 4 > ascii_str.length()) break;
+    if (pos + 4 > ascii_str.length()) return;
     std::string temp_hex = ascii_str.substr(pos, 4);
     pos += 4;
     uint16_t temp_raw = (uint16_t) strtol(temp_hex.c_str(), nullptr, 16);
