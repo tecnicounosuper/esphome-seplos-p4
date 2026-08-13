@@ -44,10 +44,15 @@ void SeplosParserHub::update() {
     poll_adr++;
 
     if (adr == 0) {
-      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 1 Master (ADR 0x00)...");
+      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 1 Master (ADR 0x00 / Modbus 0x01)...");
+      // Invio combinato Modbus RTU + ASCII per massima compatibilità con tutti i firmware Seplos V3
+      static const uint8_t modbus_q1[8] = {0x01, 0x04, 0x10, 0x00, 0x00, 0x1A, 0x75, 0x08};
+      this->write_array(modbus_q1, 8);
       this->write_str("~20004642E002000D000D010D020000FDA9\r");
     } else {
-      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 2 Slave (ADR 0x01)...");
+      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 2 Slave (ADR 0x01 / Modbus 0x02)...");
+      static const uint8_t modbus_q2[8] = {0x02, 0x04, 0x10, 0x00, 0x00, 0x1A, 0x75, 0x3B};
+      this->write_array(modbus_q2, 8);
       this->write_str("~20014642E002000D000D010D020000FDA8\r");
     }
   } else {
@@ -58,26 +63,39 @@ void SeplosParserHub::update() {
 void SeplosParserHub::parse_rx_buffer_() {
   if (rx_buffer_.empty()) return;
 
-  // 1. ISOLAMENTO FRAME ASCII (Se inizia con '~' o contiene frame ASCII)
-  std::vector<uint8_t> ascii_chars;
-  bool ascii_found = false;
-  for (uint8_t b : rx_buffer_) {
-    if (b == 0x7E) ascii_found = true;
-    if (ascii_found) {
-      if (b == 0x7E || b == 0x20 || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f') || b == 0x0D || b == 0x0A) {
-        ascii_chars.push_back(b);
-      }
+  // 1. TENTATIVO DI DECODIFICA STREAM MODBUS RTU CON VALIDAZIONE RIGIDA CRC16
+  // Priorità a Modbus RTU per evitare che i byte binari vengano scambiati per ASCII
+  parse_seplos_modbus_frame_(rx_buffer_.data(), rx_buffer_.size());
+
+  // 2. TENTATIVO DI DECODIFICA FRAME ASCII PURO
+  // Un vero frame ASCII Seplos deve iniziare con '~' e contenere SOLTANTO caratteri esadecimali stampabili!
+  size_t start_tilde = std::string::npos;
+  for (size_t i = 0; i < rx_buffer_.size(); i++) {
+    if (rx_buffer_[i] == 0x7E) { // '~'
+      start_tilde = i;
+      break;
     }
   }
 
-  // 2. PARSING FRAME ASCII SEPLOS V3 (~20ADR...)
-  if (ascii_found && ascii_chars.size() >= 15) {
-    parse_seplos_ascii_frame_(ascii_chars);
-    return; // Se è un frame ASCII, NON eseguire il parser Modbus per evitare falsi positivi!
-  }
+  if (start_tilde != std::string::npos) {
+    std::vector<uint8_t> pure_ascii;
+    bool valid_ascii_sequence = true;
 
-  // 3. PARSING STREAM MODBUS RTU CON CRC16
-  parse_seplos_modbus_frame_(rx_buffer_.data(), rx_buffer_.size());
+    for (size_t i = start_tilde; i < rx_buffer_.size(); i++) {
+      uint8_t b = rx_buffer_[i];
+      if (b == 0x0D || b == 0x0A) break; // Fine riga ASCII
+      if (b == 0x7E || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f')) {
+        pure_ascii.push_back(b);
+      } else {
+        valid_ascii_sequence = false; // Trovato byte binario non ASCII! Annulla parsing ASCII.
+        break;
+      }
+    }
+
+    if (valid_ascii_sequence && pure_ascii.size() >= 17) {
+      parse_seplos_ascii_frame_(pure_ascii);
+    }
+  }
 }
 
 void SeplosParserHub::parse_seplos_ascii_frame_(const std::vector<uint8_t> &frame) {
@@ -283,8 +301,8 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
       const uint8_t *payload = &data[i + 3];
       uint8_t bms_idx = raw_addr - 1; // Mappatura 1-based (Modbus ADR 1 -> BMS 0, ADR 2 -> BMS 1)
 
-      if (byte_count == 0x34 && (i + 53 <= len)) {
-        // Blocco Seplos 26 registri (52 byte): 16 celle + temp + telemetria
+      if (byte_count >= 0x34 && (i + byte_count + 5 <= len)) {
+        // Blocco Seplos 26+ registri (>= 52 byte): 16 celle + temp + telemetria
         float min_v = 99.0f;
         float max_v = 0.0f;
         bool cells_valid = false;
