@@ -281,9 +281,9 @@ static uint16_t calculate_modbus_crc16(const uint8_t *data, uint16_t len) {
 }
 
 void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len) {
-  if (len < 10) return;
+  if (len < 8) return;
 
-  for (size_t i = 0; i < len - 8; i++) {
+  for (size_t i = 0; i < len - 5; i++) {
     uint8_t raw_addr = data[i];
     uint8_t func = data[i + 1];
     uint8_t byte_count = data[i + 2];
@@ -295,19 +295,65 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
       uint16_t frame_crc = data[i + msg_len - 2] | (data[i + msg_len - 1] << 8);
 
       if (calculated_crc != frame_crc) {
-        continue; // Ignora se il CRC Modbus non corrisponde
+        continue; // CRC errato, passa al prossimo byte
       }
 
       const uint8_t *payload = &data[i + 3];
-      uint8_t bms_idx = raw_addr - 1; // Mappatura 1-based (Modbus ADR 1 -> BMS 0, ADR 2 -> BMS 1)
+      uint8_t bms_idx = raw_addr - 1; // Modbus ADR 1 -> BMS 0 (Master), ADR 2 -> BMS 1 (Slave)
 
-      if (byte_count >= 0x34 && (i + byte_count + 5 <= len)) {
-        // Blocco Seplos 26+ registri (>= 52 byte): 16 celle + temp + telemetria
+      // 1. CASO 0x1000 (Telemetria Generale Pack Info A)
+      // Prima word = Pack Voltage (in 0.01V, es. 5120 = 51.20V)
+      uint16_t reg0 = (uint16_t)((payload[0] << 8) | payload[1]);
+      if (reg0 >= 3000 && reg0 <= 7000 && byte_count >= 14) {
+        float voltage = reg0 * 0.01f;
+        int16_t raw_i = (int16_t)((payload[2] << 8) | payload[3]);
+        float current = raw_i * 0.01f;
+        uint16_t raw_rem_cap = (uint16_t)((payload[4] << 8) | payload[5]);
+        float rem_cap = raw_rem_cap * 0.01f;
+        uint16_t raw_soc = (uint16_t)((payload[8] << 8) | payload[9]);
+        float soc = raw_soc > 1000 ? raw_soc * 0.1f : (float)raw_soc;
+        uint16_t raw_soh = (uint16_t)((payload[10] << 8) | payload[11]);
+        float soh = raw_soh > 1000 ? raw_soh * 0.1f : (float)raw_soh;
+        uint16_t cycles = (uint16_t)((payload[12] << 8) | payload[13]);
+
+        if (voltage > 30.0f && voltage < 70.0f) publish_val_(bms_idx, "pack_voltage", voltage);
+        if (current > -500.0f && current < 500.0f) publish_val_(bms_idx, "current", current);
+        if (rem_cap >= 0.0f && rem_cap <= 2000.0f) publish_val_(bms_idx, "remaining_capacity", rem_cap);
+        if (soc >= 0.0f && soc <= 100.0f) publish_val_(bms_idx, "soc", soc);
+        if (soh >= 0.0f && soh <= 100.0f) publish_val_(bms_idx, "soh", soh);
+        if (cycles < 65000) publish_val_(bms_idx, "cycles", (float)cycles);
+
+        if (byte_count >= 28) {
+          int16_t raw_t1 = (int16_t)((payload[18] << 8) | payload[19]);
+          int16_t raw_t2 = (int16_t)((payload[20] << 8) | payload[21]);
+          int16_t raw_t3 = (int16_t)((payload[22] << 8) | payload[23]);
+          int16_t raw_t4 = (int16_t)((payload[24] << 8) | payload[25]);
+          int16_t raw_tmos = (int16_t)((payload[26] << 8) | payload[27]);
+
+          float t1 = raw_t1 > 1000 ? (raw_t1 - 2731) * 0.1f : raw_t1 * 0.1f;
+          float t2 = raw_t2 > 1000 ? (raw_t2 - 2731) * 0.1f : raw_t2 * 0.1f;
+          float t3 = raw_t3 > 1000 ? (raw_t3 - 2731) * 0.1f : raw_t3 * 0.1f;
+          float t4 = raw_t4 > 1000 ? (raw_t4 - 2731) * 0.1f : raw_t4 * 0.1f;
+          float tmos = raw_tmos > 1000 ? (raw_tmos - 2731) * 0.1f : raw_tmos * 0.1f;
+
+          if (t1 > -30.0f && t1 < 100.0f) publish_val_(bms_idx, "temp_1", t1);
+          if (t2 > -30.0f && t2 < 100.0f) publish_val_(bms_idx, "temp_2", t2);
+          if (t3 > -30.0f && t3 < 100.0f) publish_val_(bms_idx, "temp_3", t3);
+          if (t4 > -30.0f && t4 < 100.0f) publish_val_(bms_idx, "temp_4", t4);
+          if (tmos > -30.0f && tmos < 100.0f) publish_val_(bms_idx, "mos_temp", tmos);
+        }
+        break;
+      }
+
+      // 2. CASO 0x1100 (Pack Info B - Cell Voltages 16S + Temps)
+      // Prima word = Cell 1 Voltage (in mV, es. 3300 = 3.30V)
+      if (reg0 >= 2000 && reg0 <= 4500 && byte_count >= 32) {
         float min_v = 99.0f;
         float max_v = 0.0f;
         bool cells_valid = false;
 
         for (int c = 0; c < 16; c++) {
+          if (c * 2 + 1 >= byte_count) break;
           uint16_t cell_mv = (uint16_t)((payload[c * 2] << 8) | payload[c * 2 + 1]);
           float cell_v = cell_mv * 0.001f;
           if (cell_v > 2.0f && cell_v < 4.5f) {
@@ -323,33 +369,6 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
           publish_val_(bms_idx, "max_cell_voltage", max_v);
           publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f);
         }
-
-        // Temperature 4 sonde ( offset Kelvin/0.1C )
-        float t1 = ((int16_t)((payload[32] << 8) | payload[33]) - 2731) * 0.1f;
-        float t2 = ((int16_t)((payload[34] << 8) | payload[35]) - 2731) * 0.1f;
-        float t3 = ((int16_t)((payload[36] << 8) | payload[37]) - 2731) * 0.1f;
-        float t4 = ((int16_t)((payload[38] << 8) | payload[39]) - 2731) * 0.1f;
-        if (t1 > -30.0f && t1 < 100.0f) publish_val_(bms_idx, "temp_1", t1);
-        if (t2 > -30.0f && t2 < 100.0f) publish_val_(bms_idx, "temp_2", t2);
-        if (t3 > -30.0f && t3 < 100.0f) publish_val_(bms_idx, "temp_3", t3);
-        if (t4 > -30.0f && t4 < 100.0f) publish_val_(bms_idx, "temp_4", t4);
-
-        // Telemetria Generale
-        int16_t raw_i = (int16_t)((payload[40] << 8) | payload[41]);
-        uint16_t raw_v = (uint16_t)((payload[42] << 8) | payload[43]);
-        uint16_t raw_rem_cap = (uint16_t)((payload[44] << 8) | payload[45]);
-        uint16_t raw_soc = (uint16_t)((payload[48] << 8) | payload[49]);
-
-        float voltage = raw_v * 0.01f;
-        float current = raw_i * 0.01f;
-        float rem_cap = raw_rem_cap * 0.01f;
-        float soc = raw_soc * 0.1f;
-
-        if (voltage > 30.0f && voltage < 70.0f) publish_val_(bms_idx, "pack_voltage", voltage);
-        if (current > -500.0f && current < 500.0f) publish_val_(bms_idx, "current", current);
-        if (soc <= 100.0f && soc >= 0.0f) publish_val_(bms_idx, "soc", soc);
-        if (rem_cap <= 2000.0f && rem_cap >= 0.0f) publish_val_(bms_idx, "remaining_capacity", rem_cap);
-
         break;
       }
     }
