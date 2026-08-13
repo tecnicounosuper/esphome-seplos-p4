@@ -36,9 +36,10 @@ TYPES = {
     "mos_temp": "set_mos_temp_sensor",
 }
 
-# Genera dinamicamente le opzioni per le 16 celle (cell_1 ... cell_16)
+# Genera dinamicamente le opzioni per le 16 celle (cell_1 ... cell_16 e cell_1_voltage ... cell_16_voltage)
 for i in range(1, 17):
     TYPES[f"cell_{i}"] = f"set_cell_{i}_sensor"
+    TYPES[f"cell_{i}_voltage"] = f"set_cell_{i}_sensor"
 
 CONFIG_SCHEMA = (
     sensor.sensor_schema(
