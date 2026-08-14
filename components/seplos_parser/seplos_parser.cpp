@@ -39,21 +39,34 @@ void SeplosParserHub::loop() {
 void SeplosParserHub::update() {
   uint32_t now = millis();
   if (active_polling_ || (now - last_rx_time_ > 8000)) {
-    static uint8_t poll_adr = 0;
-    uint8_t adr = poll_adr % bms_count_;
-    poll_adr++;
+    static uint8_t poll_step = 0;
+    poll_step++;
 
-    if (adr == 0) {
-      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 1 Master (ADR 0x00 / Modbus 0x01)...");
-      // Invio combinato Modbus RTU + ASCII per massima compatibilità con tutti i firmware Seplos V3
-      static const uint8_t modbus_q1[8] = {0x01, 0x04, 0x10, 0x00, 0x00, 0x1A, 0x75, 0x08};
-      this->write_array(modbus_q1, 8);
-      this->write_str("~20004642E002000D000D010D020000FDA9\r");
+    uint8_t target = (poll_step / 2) % (bms_count_ > 0 ? bms_count_ : 1);
+    uint8_t query_type = poll_step % 2; // 0 = Telemetria 0x1000, 1 = Celle 0x1100
+
+    if (target == 0) {
+      if (query_type == 0) {
+        ESP_LOGI(TAG, "Polling Modbus 0x1000 (Telemetria) per BMS 0 Master (Modbus Addr 0x01)...");
+        static const uint8_t modbus_q1[8] = {0x01, 0x04, 0x10, 0x00, 0x00, 0x0D, 0x0F, 0x75};
+        this->write_array(modbus_q1, 8);
+        this->write_str("~20004642E002000D000D010D020000FDA9\r");
+      } else {
+        ESP_LOGI(TAG, "Polling Modbus 0x1100 (Celle 16S) per BMS 0 Master (Modbus Addr 0x01)...");
+        static const uint8_t modbus_q1_cells[8] = {0x01, 0x04, 0x11, 0x00, 0x00, 0x14, 0x31, 0xF5};
+        this->write_array(modbus_q1_cells, 8);
+      }
     } else {
-      ESP_LOGI(TAG, "Polling Attivo Seplos V3 per BMS 2 Slave (ADR 0x01 / Modbus 0x02)...");
-      static const uint8_t modbus_q2[8] = {0x02, 0x04, 0x10, 0x00, 0x00, 0x1A, 0x75, 0x3B};
-      this->write_array(modbus_q2, 8);
-      this->write_str("~20014642E002000D000D010D020000FDA8\r");
+      if (query_type == 0) {
+        ESP_LOGI(TAG, "Polling Modbus 0x1000 (Telemetria) per BMS 1 Slave (Modbus Addr 0x02)...");
+        static const uint8_t modbus_q2[8] = {0x02, 0x04, 0x10, 0x00, 0x00, 0x0D, 0x3C, 0x75};
+        this->write_array(modbus_q2, 8);
+        this->write_str("~20014642E002000D000D010D020000FDA8\r");
+      } else {
+        ESP_LOGI(TAG, "Polling Modbus 0x1100 (Celle 16S) per BMS 1 Slave (Modbus Addr 0x02)...");
+        static const uint8_t modbus_q2_cells[8] = {0x02, 0x04, 0x11, 0x00, 0x00, 0x14, 0x02, 0xF5};
+        this->write_array(modbus_q2_cells, 8);
+      }
     }
   } else {
     ESP_LOGD(TAG, "Heartbeat Sniffer: ascolto passivo attivo sulla linea RS485 Seplos V3...");
@@ -301,27 +314,91 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
       const uint8_t *payload = &data[i + 3];
       uint8_t bms_idx = raw_addr - 1; // Modbus ADR 1 -> BMS 0 (Master), ADR 2 -> BMS 1 (Slave)
 
-      // 1. CASO 0x1000 (Telemetria Generale Pack Info A)
-      // Prima word = Pack Voltage (in 0.01V, es. 5120 = 51.20V)
       uint16_t reg0 = (uint16_t)((payload[0] << 8) | payload[1]);
+      uint16_t reg1 = (uint16_t)((payload[2] << 8) | payload[3]);
+      uint16_t reg2 = (uint16_t)((payload[4] << 8) | payload[5]);
+
+      // Controllo se il payload rappresenta il blocco celle 16S (0x1100):
+      // In un blocco celle, le prime 3 word sono le tensioni delle celle 1, 2, 3 in mV (2000 mV..4500 mV)
+      bool is_cell_block = (reg0 >= 2000 && reg0 <= 4500) &&
+                           (reg1 >= 2000 && reg1 <= 4500) &&
+                           (reg2 >= 2000 && reg2 <= 4500);
+
+      if (is_cell_block && byte_count >= 32) {
+        // 1. CASO 0x1100 (Pack Info B - Tensioni Celle 16S + Temperature)
+        float min_v = 99.0f;
+        float max_v = 0.0f;
+        bool cells_valid = false;
+
+        for (int c = 0; c < 16; c++) {
+          if (c * 2 + 1 >= byte_count) break;
+          uint16_t cell_mv = (uint16_t)((payload[c * 2] << 8) | payload[c * 2 + 1]);
+          float cell_v = cell_mv * 0.001f;
+          if (cell_v > 1.8f && cell_v < 4.5f) {
+            publish_cell_val_(bms_idx, c, cell_v);
+            if (cell_v < min_v) min_v = cell_v;
+            if (cell_v > max_v) max_v = cell_v;
+            cells_valid = true;
+          }
+        }
+
+        if (cells_valid && max_v >= min_v) {
+          publish_val_(bms_idx, "min_cell_voltage", min_v);
+          publish_val_(bms_idx, "max_cell_voltage", max_v);
+          publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f);
+        }
+
+        // Se presenti nel payload 0x1100, leggi anche le 4 temperature
+        if (byte_count >= 40) {
+          int16_t raw_t1 = (int16_t)((payload[32] << 8) | payload[33]);
+          int16_t raw_t2 = (int16_t)((payload[34] << 8) | payload[35]);
+          int16_t raw_t3 = (int16_t)((payload[36] << 8) | payload[37]);
+          int16_t raw_t4 = (int16_t)((payload[38] << 8) | payload[39]);
+
+          float t1 = raw_t1 > 1000 ? (raw_t1 - 2731) * 0.1f : raw_t1 * 0.1f;
+          float t2 = raw_t2 > 1000 ? (raw_t2 - 2731) * 0.1f : raw_t2 * 0.1f;
+          float t3 = raw_t3 > 1000 ? (raw_t3 - 2731) * 0.1f : raw_t3 * 0.1f;
+          float t4 = raw_t4 > 1000 ? (raw_t4 - 2731) * 0.1f : raw_t4 * 0.1f;
+
+          if (t1 > -30.0f && t1 < 100.0f) publish_val_(bms_idx, "temp_1", t1);
+          if (t2 > -30.0f && t2 < 100.0f) publish_val_(bms_idx, "temp_2", t2);
+          if (t3 > -30.0f && t3 < 100.0f) publish_val_(bms_idx, "temp_3", t3);
+          if (t4 > -30.0f && t4 < 100.0f) publish_val_(bms_idx, "temp_4", t4);
+        }
+
+        i += msg_len - 1;
+        continue;
+      }
+
+      // 2. CASO 0x1000 (Pack Info A - Telemetria Generale)
+      // Prima word = Pack Voltage in 0.01V (3000..7000 = 30.00V .. 70.00V)
       if (reg0 >= 3000 && reg0 <= 7000 && byte_count >= 14) {
         float voltage = reg0 * 0.01f;
-        int16_t raw_i = (int16_t)((payload[2] << 8) | payload[3]);
+        int16_t raw_i = (int16_t)reg1;
         float current = raw_i * 0.01f;
-        uint16_t raw_rem_cap = (uint16_t)((payload[4] << 8) | payload[5]);
+        uint16_t raw_rem_cap = reg2;
         float rem_cap = raw_rem_cap * 0.01f;
-        uint16_t raw_soc = (uint16_t)((payload[8] << 8) | payload[9]);
-        float soc = raw_soc > 1000 ? raw_soc * 0.1f : (float)raw_soc;
-        uint16_t raw_soh = (uint16_t)((payload[10] << 8) | payload[11]);
-        float soh = raw_soh > 1000 ? raw_soh * 0.1f : (float)raw_soh;
-        uint16_t cycles = (uint16_t)((payload[12] << 8) | payload[13]);
 
         if (voltage > 30.0f && voltage < 70.0f) publish_val_(bms_idx, "pack_voltage", voltage);
         if (current > -500.0f && current < 500.0f) publish_val_(bms_idx, "current", current);
         if (rem_cap >= 0.0f && rem_cap <= 2000.0f) publish_val_(bms_idx, "remaining_capacity", rem_cap);
-        if (soc >= 0.0f && soc <= 100.0f) publish_val_(bms_idx, "soc", soc);
-        if (soh >= 0.0f && soh <= 100.0f) publish_val_(bms_idx, "soh", soh);
-        if (cycles < 65000) publish_val_(bms_idx, "cycles", (float)cycles);
+
+        if (byte_count >= 10) {
+          uint16_t raw_soc = (uint16_t)((payload[8] << 8) | payload[9]);
+          float soc = raw_soc > 1000 ? raw_soc * 0.1f : (float)raw_soc;
+          if (soc >= 0.0f && soc <= 100.0f) publish_val_(bms_idx, "soc", soc);
+        }
+
+        if (byte_count >= 12) {
+          uint16_t raw_soh = (uint16_t)((payload[10] << 8) | payload[11]);
+          float soh = raw_soh > 1000 ? raw_soh * 0.1f : (float)raw_soh;
+          if (soh >= 0.0f && soh <= 100.0f) publish_val_(bms_idx, "soh", soh);
+        }
+
+        if (byte_count >= 14) {
+          uint16_t cycles = (uint16_t)((payload[12] << 8) | payload[13]);
+          if (cycles < 65000) publish_val_(bms_idx, "cycles", (float)cycles);
+        }
 
         if (byte_count >= 28) {
           int16_t raw_t1 = (int16_t)((payload[18] << 8) | payload[19]);
@@ -342,34 +419,9 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
           if (t4 > -30.0f && t4 < 100.0f) publish_val_(bms_idx, "temp_4", t4);
           if (tmos > -30.0f && tmos < 100.0f) publish_val_(bms_idx, "mos_temp", tmos);
         }
-        break;
-      }
 
-      // 2. CASO 0x1100 (Pack Info B - Cell Voltages 16S + Temps)
-      // Prima word = Cell 1 Voltage (in mV, es. 3300 = 3.30V)
-      if (reg0 >= 2000 && reg0 <= 4500 && byte_count >= 32) {
-        float min_v = 99.0f;
-        float max_v = 0.0f;
-        bool cells_valid = false;
-
-        for (int c = 0; c < 16; c++) {
-          if (c * 2 + 1 >= byte_count) break;
-          uint16_t cell_mv = (uint16_t)((payload[c * 2] << 8) | payload[c * 2 + 1]);
-          float cell_v = cell_mv * 0.001f;
-          if (cell_v > 2.0f && cell_v < 4.5f) {
-            publish_cell_val_(bms_idx, c, cell_v);
-            if (cell_v < min_v) min_v = cell_v;
-            if (cell_v > max_v) max_v = cell_v;
-            cells_valid = true;
-          }
-        }
-
-        if (cells_valid && max_v >= min_v) {
-          publish_val_(bms_idx, "min_cell_voltage", min_v);
-          publish_val_(bms_idx, "max_cell_voltage", max_v);
-          publish_val_(bms_idx, "cell_delta_voltage", (max_v - min_v) * 1000.0f);
-        }
-        break;
+        i += msg_len - 1;
+        continue;
       }
     }
   }
