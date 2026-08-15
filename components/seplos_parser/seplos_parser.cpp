@@ -383,29 +383,29 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
         if (current > -500.0f && current < 500.0f) publish_val_(bms_idx, "current", current);
         if (rem_cap >= 0.0f && rem_cap <= 2000.0f) publish_val_(bms_idx, "remaining_capacity", rem_cap);
 
-        if (byte_count >= 10) {
-          uint16_t raw_soc = (uint16_t)((payload[8] << 8) | payload[9]);
+        if (byte_count >= 12) {
+          uint16_t raw_soc = (uint16_t)((payload[10] << 8) | payload[11]);
           float soc = raw_soc > 100 ? raw_soc * 0.1f : (float)raw_soc;
           if (soc >= 0.0f && soc <= 100.0f) publish_val_(bms_idx, "soc", soc);
         }
 
-        if (byte_count >= 12) {
-          uint16_t raw_soh = (uint16_t)((payload[10] << 8) | payload[11]);
+        if (byte_count >= 14) {
+          uint16_t raw_soh = (uint16_t)((payload[12] << 8) | payload[13]);
           float soh = raw_soh > 100 ? raw_soh * 0.1f : (float)raw_soh;
           if (soh >= 0.0f && soh <= 100.0f) publish_val_(bms_idx, "soh", soh);
         }
 
-        if (byte_count >= 14) {
-          uint16_t cycles = (uint16_t)((payload[12] << 8) | payload[13]);
+        if (byte_count >= 16) {
+          uint16_t cycles = (uint16_t)((payload[14] << 8) | payload[15]);
           if (cycles < 65000) publish_val_(bms_idx, "cycles", (float)cycles);
         }
 
-        if (byte_count >= 28) {
-          int16_t raw_t1 = (int16_t)((payload[18] << 8) | payload[19]);
-          int16_t raw_t2 = (int16_t)((payload[20] << 8) | payload[21]);
-          int16_t raw_t3 = (int16_t)((payload[22] << 8) | payload[23]);
-          int16_t raw_t4 = (int16_t)((payload[24] << 8) | payload[25]);
-          int16_t raw_tmos = (int16_t)((payload[26] << 8) | payload[27]);
+        if (byte_count >= 26) {
+          int16_t raw_t1 = (int16_t)((payload[16] << 8) | payload[17]);
+          int16_t raw_t2 = (int16_t)((payload[18] << 8) | payload[19]);
+          int16_t raw_t3 = (int16_t)((payload[20] << 8) | payload[21]);
+          int16_t raw_t4 = (int16_t)((payload[22] << 8) | payload[23]);
+          int16_t raw_tmos = (int16_t)((payload[24] << 8) | payload[25]);
 
           float t1 = raw_t1 > 1000 ? (raw_t1 - 2731) * 0.1f : raw_t1 * 0.1f;
           float t2 = raw_t2 > 1000 ? (raw_t2 - 2731) * 0.1f : raw_t2 * 0.1f;
