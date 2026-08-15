@@ -385,13 +385,13 @@ void SeplosParserHub::parse_seplos_modbus_frame_(const uint8_t *data, size_t len
 
         if (byte_count >= 10) {
           uint16_t raw_soc = (uint16_t)((payload[8] << 8) | payload[9]);
-          float soc = raw_soc > 1000 ? raw_soc * 0.1f : (float)raw_soc;
+          float soc = raw_soc > 100 ? raw_soc * 0.1f : (float)raw_soc;
           if (soc >= 0.0f && soc <= 100.0f) publish_val_(bms_idx, "soc", soc);
         }
 
         if (byte_count >= 12) {
           uint16_t raw_soh = (uint16_t)((payload[10] << 8) | payload[11]);
-          float soh = raw_soh > 1000 ? raw_soh * 0.1f : (float)raw_soh;
+          float soh = raw_soh > 100 ? raw_soh * 0.1f : (float)raw_soh;
           if (soh >= 0.0f && soh <= 100.0f) publish_val_(bms_idx, "soh", soh);
         }
 
